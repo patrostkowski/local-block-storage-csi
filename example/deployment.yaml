@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lbsp-test-claim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Block
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-block-storage-csi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lbsp-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lbsp-test
+  template:
+    metadata:
+      labels:
+        app: lbsp-test
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - "sleep 3600"
+          volumeDevices:
+            - name: data
+              devicePath: /dev/blockdata
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: lbsp-test-claim

@@ -1,0 +1,231 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-block-storage-csi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: local-block-storage-csi-manager
+  namespace: local-block-storage-csi
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: local-block-storage-csi-node
+  namespace: local-block-storage-csi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: local-block-storage-csi
+rules:
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: local-block-storage-csi-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: local-block-storage-csi
+subjects:
+  - kind: ServiceAccount
+    name: local-block-storage-csi-manager
+    namespace: local-block-storage-csi
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: local-block-storage-csi-node
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: local-block-storage-csi
+subjects:
+  - kind: ServiceAccount
+    name: local-block-storage-csi-node
+    namespace: local-block-storage-csi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-block-storage-csi-manager
+  namespace: local-block-storage-csi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: local-block-storage-csi-manager
+  template:
+    metadata:
+      labels:
+        app: local-block-storage-csi-manager
+    spec:
+      serviceAccountName: local-block-storage-csi-manager
+      containers:
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=/csi/csi.sock
+            - --leader-election
+            - --leader-election-namespace=local-block-storage-csi
+            - --feature-gates=Topology=true
+            - --strict-topology=true
+            - --v=2
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: manager
+          image: docker.io/patrostkowski/local-block-storage-csi:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - manager
+            - --endpoint=unix:///csi/csi.sock
+            - --data-root=/var/lib/local-block-storage-csi
+            - --state-root=/var/lib/local-block-storage-csi/state
+          volumeMounts:
+            - name: data-root
+              mountPath: /var/lib/local-block-storage-csi
+            - name: state-root
+              mountPath: /var/lib/local-block-storage-csi/state
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: data-root
+          hostPath:
+            path: /var/lib/local-block-storage-csi
+            type: DirectoryOrCreate
+        - name: state-root
+          hostPath:
+            path: /var/lib/local-block-storage-csi/state
+            type: DirectoryOrCreate
+        - name: socket-dir
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: local-block-storage-csi-node
+  namespace: local-block-storage-csi
+spec:
+  selector:
+    matchLabels:
+      app: local-block-storage-csi-node
+  template:
+    metadata:
+      labels:
+        app: local-block-storage-csi-node
+    spec:
+      serviceAccountName: local-block-storage-csi-node
+      containers:
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.11.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/local-block-storage-csi/csi.sock
+            - --v=2
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: node
+          image: docker.io/patrostkowski/local-block-storage-csi:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          args:
+            - node
+            - --node-id=$(NODE_ID)
+            - --endpoint=unix:///csi/csi.sock
+            - --data-root=/var/lib/local-block-storage-csi
+            - --state-root=/var/lib/local-block-storage-csi/state
+          volumeMounts:
+            - name: data-root
+              mountPath: /var/lib/local-block-storage-csi
+            - name: state-root
+              mountPath: /var/lib/local-block-storage-csi/state
+            - name: socket-dir
+              mountPath: /csi
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+            - name: dev
+              mountPath: /dev
+      volumes:
+        - name: data-root
+          hostPath:
+            path: /var/lib/local-block-storage-csi
+            type: DirectoryOrCreate
+        - name: state-root
+          hostPath:
+            path: /var/lib/local-block-storage-csi/state
+            type: DirectoryOrCreate
+        - name: socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/local-block-storage-csi
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+            type: Directory
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: local-block-storage-csi
+spec:
+  attachRequired: false
+  podInfoOnMount: false
+  volumeLifecycleModes:
+    - Persistent
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-block-storage-csi
+provisioner: local-block-storage-csi
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
