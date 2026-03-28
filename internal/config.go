@@ -25,13 +25,14 @@ type Config struct {
 }
 
 type volumeState struct {
-	VolumeID      string            `json:"volumeID"`
-	BackingFile   string            `json:"backingFile"`
-	CapacityBytes int64             `json:"capacityBytes"`
-	NodeID        string            `json:"nodeID"`
-	LoopDevice    string            `json:"loopDevice,omitempty"`
-	StagedPath    string            `json:"stagedPath,omitempty"`
-	PublishedTo   map[string]string `json:"publishedTo,omitempty"`
+	VolumeID         string            `json:"volumeID"`
+	BackingFile      string            `json:"backingFile"`
+	CapacityBytes    int64             `json:"capacityBytes"`
+	NodeID           string            `json:"nodeID"`
+	LoopDevice       string            `json:"loopDevice,omitempty"`
+	StagedPath       string            `json:"stagedPath,omitempty"`
+	PublishedTo      map[string]string `json:"publishedTo,omitempty"`
+	StagedDevicePath string            `json:"stagedDevicePath,omitempty"`
 }
 
 type Driver struct {

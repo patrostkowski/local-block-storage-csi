@@ -62,20 +62,28 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if state.NodeID != d.cfg.NodeID {
 		return nil, status.Errorf(codes.FailedPrecondition, "volume belongs to node %q, this node is %q", state.NodeID, d.cfg.NodeID)
 	}
-
-	if state.LoopDevice != "" && state.StagedPath == req.GetStagingTargetPath() {
-		klog.Infof("NodeStageVolume idempotent volumeID=%s loopDevice=%s", state.VolumeID, state.LoopDevice)
-		return &csi.NodeStageVolumeResponse{}, nil
+	if state.NodeID != d.cfg.NodeID {
+		return nil, status.Errorf(codes.FailedPrecondition, "volume belongs to node %q, this node is %q", state.NodeID, d.cfg.NodeID)
 	}
 
 	loopDevice, err := d.ensureLoopDevice(state.BackingFile)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "ensure loop device: %v", err)
 	}
-	klog.Infof("NodeStageVolume attached volumeID=%s loopDevice=%s", state.VolumeID, loopDevice)
+
+	stageDir := req.GetStagingTargetPath()
+	stageDevicePath := filepath.Join(stageDir, "block-device")
+
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		return nil, status.Errorf(codes.Internal, "mkdir staging dir: %v", err)
+	}
+	if err := d.publishBlockAtTarget(loopDevice, stageDevicePath); err != nil {
+		return nil, status.Errorf(codes.Internal, "publish staged block device: %v", err)
+	}
 
 	state.LoopDevice = strings.TrimSpace(loopDevice)
-	state.StagedPath = req.GetStagingTargetPath()
+	state.StagedPath = stageDir
+	state.StagedDevicePath = stageDevicePath
 
 	if err := d.saveVolumeStateByID(state); err != nil {
 		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
@@ -101,14 +109,33 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 		return nil, status.Errorf(codes.Internal, "load volume state: %v", err)
 	}
 
-	if state.LoopDevice != "" {
-		klog.Infof("NodeUnstageVolume detach volumeID=%s loopDevice=%s", state.VolumeID, state.LoopDevice)
-		if loopNumber, err := d.loopDeviceNumber(state.LoopDevice); err == nil {
-			_ = d.losetupDeviceDetach(loopNumber)
+	if state.StagedDevicePath != "" {
+		_ = os.Remove(state.StagedDevicePath)
+	}
+
+	if state.PublishedTo != nil {
+		for targetPath := range state.PublishedTo {
+			if _, err := os.Stat(targetPath); err != nil {
+				if os.IsNotExist(err) {
+					delete(state.PublishedTo, targetPath)
+				}
+			}
+		}
+	}
+
+	if len(state.PublishedTo) == 0 && state.LoopDevice != "" {
+		loopNumber, err := d.loopDeviceNumber(state.LoopDevice)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "parse loop device %s: %v", state.LoopDevice, err)
+		}
+		if err := d.losetupDeviceDetach(loopNumber); err != nil {
+			return nil, status.Errorf(codes.Internal, "detach loop device %s: %v", state.LoopDevice, err)
 		}
 		state.LoopDevice = ""
 	}
+
 	state.StagedPath = ""
+	state.StagedDevicePath = ""
 
 	if err := d.saveVolumeStateByID(state); err != nil {
 		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
@@ -121,7 +148,6 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	if d.cfg.Mode != "node" {
 		return nil, status.Error(codes.Unimplemented, "node service not enabled")
 	}
-	klog.Infof("NodePublishVolume volumeID=%s targetPath=%s", req.GetVolumeId(), req.GetTargetPath())
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "missing volume_id")
 	}
@@ -136,6 +162,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "load volume state: %v", err)
 	}
+	klog.Infof("NodePublishVolume volumeID=%s targetPath=%s loopDevice=%s", req.GetVolumeId(), req.GetTargetPath(), state.LoopDevice)
 	if state.NodeID != d.cfg.NodeID {
 		return nil, status.Errorf(codes.FailedPrecondition, "volume belongs to node %q, this node is %q", state.NodeID, d.cfg.NodeID)
 	}
@@ -143,22 +170,19 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Error(codes.FailedPrecondition, "volume is not staged")
 	}
 
-	target := req.GetTargetPath()
-	if err := d.ensureBlockTargetDevice(target, state.LoopDevice); err != nil {
-		return nil, status.Errorf(codes.Internal, "prepare target device: %v", err)
+	sourceDevice := state.LoopDevice
+	if state.StagedDevicePath != "" {
+		sourceDevice = state.StagedDevicePath
 	}
-	if altTarget := d.alternateBlockDevicePath(target); altTarget != "" {
-		if err := d.bindMountLoopDevice(state.LoopDevice, altTarget); err != nil {
-			return nil, status.Errorf(codes.Internal, "bind-mount alternate target device: %v", err)
-		}
-		klog.Infof("NodePublishVolume bind-mounted alternate volumeID=%s loopDevice=%s targetPath=%s", state.VolumeID, state.LoopDevice, altTarget)
+
+	if err := d.publishBlockAtTarget(sourceDevice, req.GetTargetPath()); err != nil {
+		return nil, status.Errorf(codes.Internal, "publish block device: %v", err)
 	}
-	klog.Infof("NodePublishVolume device node ready volumeID=%s loopDevice=%s targetPath=%s", state.VolumeID, state.LoopDevice, target)
 
 	if state.PublishedTo == nil {
 		state.PublishedTo = map[string]string{}
 	}
-	state.PublishedTo[target] = target
+	state.PublishedTo[req.GetTargetPath()] = sourceDevice
 
 	if err := d.saveVolumeStateByID(state); err != nil {
 		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
@@ -171,7 +195,6 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	if d.cfg.Mode != "node" {
 		return nil, status.Error(codes.Unimplemented, "node service not enabled")
 	}
-	klog.Infof("NodeUnpublishVolume volumeID=%s targetPath=%s", req.GetVolumeId(), req.GetTargetPath())
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "missing volume_id")
 	}
@@ -179,18 +202,7 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 		return nil, status.Error(codes.InvalidArgument, "missing target_path")
 	}
 
-	if d.isMounted(req.GetTargetPath()) {
-		if err := syscall.Unmount(req.GetTargetPath(), 0); err != nil {
-			return nil, status.Errorf(codes.Internal, "unmount %s: %v", req.GetTargetPath(), err)
-		}
-	}
 	_ = os.Remove(req.GetTargetPath())
-	if altTarget := d.alternateBlockDevicePath(req.GetTargetPath()); altTarget != "" {
-		if d.isMounted(altTarget) {
-			_ = syscall.Unmount(altTarget, 0)
-		}
-		_ = os.Remove(altTarget)
-	}
 
 	state, err := d.loadVolumeStateByID(req.GetVolumeId())
 	if err == nil && state.PublishedTo != nil {
@@ -217,56 +229,6 @@ func (d *Driver) nodeCap(t csi.NodeServiceCapability_RPC_Type) *csi.NodeServiceC
 	}
 }
 
-func (d *Driver) bindMountLoopDevice(loopDevice, targetPath string) error {
-	if loopDevice == "" {
-		return fmt.Errorf("missing loop device")
-	}
-	if err := d.ensureBindMountTarget(targetPath); err != nil {
-		return err
-	}
-	if d.isMounted(targetPath) {
-		return nil
-	}
-	return unix.Mount(loopDevice, targetPath, "", unix.MS_BIND, "")
-}
-
-func (d *Driver) ensureBlockTargetDevice(targetPath, loopDevice string) error {
-	if loopDevice == "" {
-		return fmt.Errorf("missing loop device")
-	}
-	info, err := os.Stat(loopDevice)
-	if err != nil {
-		return fmt.Errorf("stat loop device: %w", err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("unexpected stat type for %s", loopDevice)
-	}
-	major := unix.Major(uint64(stat.Rdev))
-	minor := unix.Minor(uint64(stat.Rdev))
-	dev := unix.Mkdev(major, minor)
-
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-		return err
-	}
-
-	if st, err := os.Stat(targetPath); err == nil {
-		if (st.Mode() & os.ModeDevice) == 0 {
-			klog.Warningf("target exists and is not a device node, replacing: %s", targetPath)
-			if err := os.Remove(targetPath); err != nil {
-				return fmt.Errorf("remove non-device target: %w", err)
-			}
-		} else {
-			return nil
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	mode := uint32(unix.S_IFBLK | 0o600)
-	return unix.Mknod(targetPath, mode, int(dev))
-}
-
 func (d *Driver) isMounted(target string) bool {
 	data, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
@@ -275,36 +237,58 @@ func (d *Driver) isMounted(target string) bool {
 	return strings.Contains(string(data), " "+target+" ")
 }
 
-func (d *Driver) ensureBindMountTarget(targetPath string) error {
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-		return err
+func (d *Driver) publishBlockAtTarget(loopDevice, targetPath string) error {
+	if loopDevice == "" {
+		return fmt.Errorf("missing loop device")
 	}
-	if _, err := os.Stat(targetPath); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	file, err := os.OpenFile(targetPath, os.O_CREATE, 0o600)
-	if err != nil {
-		return err
-	}
-	return file.Close()
-}
 
-func (d *Driver) alternateBlockDevicePath(targetPath string) string {
-	const kubeletPrefix = "/var/lib/kubelet/plugins/kubernetes.io/csi/volumeDevices/"
-	if !strings.HasPrefix(targetPath, kubeletPrefix+"publish/") {
-		return ""
+	srcInfo, err := os.Stat(loopDevice)
+	if err != nil {
+		return fmt.Errorf("stat source device %s: %w", loopDevice, err)
 	}
-	trimmed := strings.TrimPrefix(targetPath, kubeletPrefix+"publish/")
-	parts := strings.Split(trimmed, string(os.PathSeparator))
-	if len(parts) < 2 {
-		return ""
+	srcStat, ok := srcInfo.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("unexpected stat type for %s", loopDevice)
 	}
-	specName := parts[0]
-	podUID := parts[1]
-	if specName == "" || podUID == "" {
-		return ""
+	if (srcInfo.Mode() & os.ModeDevice) == 0 {
+		return fmt.Errorf("source is not a device: %s", loopDevice)
 	}
-	return filepath.Join(kubeletPrefix, specName, "dev", podUID)
+
+	srcMajor := unix.Major(uint64(srcStat.Rdev))
+	srcMinor := unix.Minor(uint64(srcStat.Rdev))
+	dev := unix.Mkdev(srcMajor, srcMinor)
+
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir parent: %w", err)
+	}
+
+	if st, err := os.Lstat(targetPath); err == nil {
+		if (st.Mode() & os.ModeDevice) == 0 {
+			if err := os.Remove(targetPath); err != nil {
+				return fmt.Errorf("remove non-device target %s: %w", targetPath, err)
+			}
+		} else {
+			dstStat, ok := st.Sys().(*syscall.Stat_t)
+			if !ok {
+				return fmt.Errorf("unexpected stat type for %s", targetPath)
+			}
+			dstMajor := unix.Major(uint64(dstStat.Rdev))
+			dstMinor := unix.Minor(uint64(dstStat.Rdev))
+			if dstMajor == srcMajor && dstMinor == srcMinor {
+				return nil
+			}
+			if err := os.Remove(targetPath); err != nil {
+				return fmt.Errorf("remove wrong device node %s: %w", targetPath, err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("lstat target %s: %w", targetPath, err)
+	}
+
+	mode := uint32(unix.S_IFBLK | 0o600)
+	if err := unix.Mknod(targetPath, mode, int(dev)); err != nil {
+		return fmt.Errorf("mknod %s: %w", targetPath, err)
+	}
+
+	return nil
 }

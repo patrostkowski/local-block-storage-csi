@@ -136,7 +136,24 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 		return nil, status.Errorf(codes.Internal, "load state: %v", err)
 	}
 
-	_ = os.Remove(state.BackingFile)
+	if state.BackingFile != "" {
+		loopDevice, err := d.findLoopDeviceByBackingFile(state.BackingFile)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "find loop device for backing file %s: %v", state.BackingFile, err)
+		}
+		if loopDevice != "" {
+			loopNumber, err := d.loopDeviceNumber(loopDevice)
+			if err != nil {
+				return nil, status.Errorf(codes.Internal, "parse loop device %s: %v", loopDevice, err)
+			}
+			if err := d.losetupDeviceDetach(loopNumber); err != nil {
+				return nil, status.Errorf(codes.Internal, "detach loop device %s: %v", loopDevice, err)
+			}
+		}
+		if err := os.Remove(state.BackingFile); err != nil && !os.IsNotExist(err) {
+			return nil, status.Errorf(codes.Internal, "remove backing file %s: %v", state.BackingFile, err)
+		}
+	}
 	_ = os.Remove(d.volumeStatePath(req.GetVolumeId()))
 	_ = d.deleteNameIndexByVolumeID(req.GetVolumeId())
 	klog.Infof("DeleteVolume cleaned volumeID=%s backingFile=%s", req.GetVolumeId(), state.BackingFile)

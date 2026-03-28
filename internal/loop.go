@@ -14,15 +14,15 @@ import (
 )
 
 func (d *Driver) ensureLoopDevice(backingFile string) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	if devicePath, err := d.findLoopDeviceByBackingFile(backingFile); err != nil {
 		return "", fmt.Errorf("scan loop devices: %v", err)
 	} else if devicePath != "" {
 		klog.Infof("reuse loop device backingFile=%s loopDevice=%s", backingFile, devicePath)
 		return devicePath, nil
 	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	if count, err := d.countLoopDevices(); err == nil && count == 0 {
 		if err := d.ensureNextLoopDeviceNode(); err != nil {
