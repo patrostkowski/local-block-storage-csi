@@ -2,11 +2,13 @@ package internal
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	losetup "github.com/freddierice/go-losetup/v2"
 	"golang.org/x/sys/unix"
@@ -91,7 +93,39 @@ func (d *Driver) losetupDeviceDetach(loopNumber uint64) error {
 }
 
 func (d *Driver) CleanupLoopDevices() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	return d.cleanupStaleLoopDevicesLocked()
+}
+
+func (d *Driver) maybeRunLoopCleanup(reason string) {
+	if !d.cfg.CleanupLoopDevices {
+		return
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	now := time.Now()
+	if !d.lastLoopCleanup.IsZero() && now.Sub(d.lastLoopCleanup) < d.cfg.LoopCleanupMinInterval {
+		return
+	}
+
+	if err := d.cleanupStaleLoopDevicesLocked(); err != nil {
+		klog.Warningf("loop cleanup failed reason=%s: %v", reason, err)
+		return
+	}
+	d.lastLoopCleanup = now
+	klog.V(4).Infof("loop cleanup completed reason=%s", reason)
+}
+
+func (d *Driver) cleanupStaleLoopDevicesLocked() error {
 	knownBackingFiles, err := d.loadKnownBackingFiles()
+	if err != nil {
+		return err
+	}
+	knownVolumeIDs, err := d.loadKnownVolumeIDs()
 	if err != nil {
 		return err
 	}
@@ -122,14 +156,21 @@ func (d *Driver) CleanupLoopDevices() error {
 		if _, ok := knownBackingFiles[backingFile]; ok {
 			continue
 		}
+
 		if _, err := os.Stat(backingFile); err != nil {
-			klog.Warningf("detaching loop device with missing backing file: %s (%s)", path, backingFile)
-			_ = losetup.New(loopNumber, os.O_RDONLY).Detach()
+			if os.IsNotExist(err) {
+				klog.Warningf("detaching stale loop device: path=%s backingFile=%s reason=missing_backing_file", path, backingFile)
+				if detachErr := losetup.New(loopNumber, os.O_RDONLY).Detach(); detachErr != nil && !errors.Is(detachErr, unix.EBUSY) {
+					klog.Warningf("failed detaching stale loop device path=%s backingFile=%s: %v", path, backingFile, detachErr)
+				}
+			}
 			continue
 		}
-		klog.Warningf("detaching unknown loop device: %s (%s)", path, backingFile)
-		_ = losetup.New(loopNumber, os.O_RDONLY).Detach()
+
+		klog.V(2).Infof("keeping loop device with existing unknown backing file path=%s backingFile=%s", path, backingFile)
 	}
+
+	d.cleanupStaleVolumeSymlinksLocked(knownVolumeIDs)
 
 	return nil
 }
@@ -209,4 +250,24 @@ func (d *Driver) loadKnownBackingFiles() (map[string]struct{}, error) {
 		}
 	}
 	return knownBackingFiles, nil
+}
+
+func (d *Driver) loadKnownVolumeIDs() (map[string]struct{}, error) {
+	knownVolumeIDs := map[string]struct{}{}
+	paths, err := filepath.Glob(filepath.Join(d.cfg.StateRoot, "volumes", "*.json"))
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range paths {
+		base := filepath.Base(path)
+		if !strings.HasSuffix(base, ".json") {
+			continue
+		}
+		volumeID := strings.TrimSuffix(base, ".json")
+		if volumeID == "" {
+			continue
+		}
+		knownVolumeIDs[volumeID] = struct{}{}
+	}
+	return knownVolumeIDs, nil
 }

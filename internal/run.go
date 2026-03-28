@@ -36,9 +36,12 @@ func Run(cfg Config) error {
 	server := grpc.NewServer()
 	driverInstance := New(cfg)
 	if cfg.Mode == "node" {
-		if err := driverInstance.CleanupLoopDevices(); err != nil {
-			klog.Warningf("loop device cleanup failed: %v", err)
+		if cfg.CleanupLoopDevices {
+			if err := driverInstance.CleanupLoopDevices(); err != nil {
+				klog.Warningf("loop device cleanup failed: %v", err)
+			}
 		}
+		driverInstance.reconcileVolumeSymlinks()
 	}
 	csi.RegisterIdentityServer(server, driverInstance)
 	if cfg.Mode == "controller" {

@@ -55,6 +55,8 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Error(codes.InvalidArgument, "raw block capability required")
 	}
 
+	d.maybeRunLoopCleanup("NodeStageVolume")
+
 	state, err := d.loadVolumeStateByID(req.GetVolumeId())
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "load volume state: %v", err)
@@ -71,6 +73,11 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Errorf(codes.Internal, "ensure loop device: %v", err)
 	}
 
+	symlinkPath, err := d.EnsureDeviceSymlink(req.GetVolumeId(), loopDevice)
+	if err != nil {
+		klog.Warningf("failed to ensure device symlink volumeID=%s loopDevice=%s: %v", req.GetVolumeId(), loopDevice, err)
+	}
+
 	stageDir := req.GetStagingTargetPath()
 	stageDevicePath := filepath.Join(stageDir, "block-device")
 
@@ -82,6 +89,7 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	}
 
 	state.LoopDevice = strings.TrimSpace(loopDevice)
+	state.DeviceSymlink = symlinkPath
 	state.StagedPath = stageDir
 	state.StagedDevicePath = stageDevicePath
 
@@ -100,6 +108,8 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "missing volume_id")
 	}
+
+	d.maybeRunLoopCleanup("NodeUnstageVolume")
 
 	state, err := d.loadVolumeStateByID(req.GetVolumeId())
 	if err != nil {
@@ -124,14 +134,22 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 	}
 
 	if len(state.PublishedTo) == 0 && state.LoopDevice != "" {
+		d.mu.Lock()
 		loopNumber, err := d.loopDeviceNumber(state.LoopDevice)
 		if err != nil {
+			d.mu.Unlock()
 			return nil, status.Errorf(codes.Internal, "parse loop device %s: %v", state.LoopDevice, err)
 		}
 		if err := d.losetupDeviceDetach(loopNumber); err != nil {
+			d.mu.Unlock()
 			return nil, status.Errorf(codes.Internal, "detach loop device %s: %v", state.LoopDevice, err)
 		}
+		d.mu.Unlock()
+		if err := d.RemoveDeviceSymlink(req.GetVolumeId()); err != nil {
+			klog.Warningf("failed removing device symlink volumeID=%s: %v", req.GetVolumeId(), err)
+		}
 		state.LoopDevice = ""
+		state.DeviceSymlink = ""
 	}
 
 	state.StagedPath = ""
@@ -158,6 +176,8 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Error(codes.InvalidArgument, "raw block capability required")
 	}
 
+	d.maybeRunLoopCleanup("NodePublishVolume")
+
 	state, err := d.loadVolumeStateByID(req.GetVolumeId())
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "load volume state: %v", err)
@@ -170,7 +190,20 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Error(codes.FailedPrecondition, "volume is not staged")
 	}
 
-	sourceDevice := state.LoopDevice
+	resolvedDevice, err := d.ResolveVolumeDevice(req.GetVolumeId())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "resolve volume device: %v", err)
+	}
+	klog.Infof("NodePublishVolume resolved volumeID=%s resolvedDevice=%s stagedDevicePath=%s", req.GetVolumeId(), resolvedDevice, state.StagedDevicePath)
+	if state.LoopDevice != resolvedDevice {
+		klog.Infof("NodePublishVolume updating loop device in state volumeID=%s oldLoop=%s newLoop=%s", req.GetVolumeId(), state.LoopDevice, resolvedDevice)
+		state.LoopDevice = resolvedDevice
+		if symlinkPath, symlinkErr := d.volumeDeviceSymlinkPath(req.GetVolumeId()); symlinkErr == nil {
+			state.DeviceSymlink = symlinkPath
+		}
+	}
+
+	sourceDevice := resolvedDevice
 	if state.StagedDevicePath != "" {
 		sourceDevice = state.StagedDevicePath
 	}

@@ -137,25 +137,33 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	}
 
 	if state.BackingFile != "" {
+		d.mu.Lock()
 		loopDevice, err := d.findLoopDeviceByBackingFile(state.BackingFile)
 		if err != nil {
+			d.mu.Unlock()
 			return nil, status.Errorf(codes.Internal, "find loop device for backing file %s: %v", state.BackingFile, err)
 		}
 		if loopDevice != "" {
 			loopNumber, err := d.loopDeviceNumber(loopDevice)
 			if err != nil {
+				d.mu.Unlock()
 				return nil, status.Errorf(codes.Internal, "parse loop device %s: %v", loopDevice, err)
 			}
 			if err := d.losetupDeviceDetach(loopNumber); err != nil {
+				d.mu.Unlock()
 				return nil, status.Errorf(codes.Internal, "detach loop device %s: %v", loopDevice, err)
 			}
 		}
+		d.mu.Unlock()
 		if err := os.Remove(state.BackingFile); err != nil && !os.IsNotExist(err) {
 			return nil, status.Errorf(codes.Internal, "remove backing file %s: %v", state.BackingFile, err)
 		}
 	}
 	_ = os.Remove(d.volumeStatePath(req.GetVolumeId()))
 	_ = d.deleteNameIndexByVolumeID(req.GetVolumeId())
+	if err := d.RemoveDeviceSymlink(req.GetVolumeId()); err != nil {
+		klog.Warningf("DeleteVolume failed removing device symlink volumeID=%s: %v", req.GetVolumeId(), err)
+	}
 	klog.Infof("DeleteVolume cleaned volumeID=%s backingFile=%s", req.GetVolumeId(), state.BackingFile)
 
 	return &csi.DeleteVolumeResponse{}, nil
