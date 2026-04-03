@@ -21,6 +21,12 @@ metadata:
   name: local-block-storage-csi
 rules:
   - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
@@ -91,6 +97,17 @@ spec:
     spec:
       serviceAccountName: local-block-storage-csi-manager
       containers:
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.6.1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --csi-address=/csi/csi.sock
+            - --leader-election
+            - --leader-election-namespace=local-block-storage-csi
+            - --v=2
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
         - name: csi-provisioner
           image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
           imagePullPolicy: IfNotPresent
@@ -184,8 +201,12 @@ spec:
               mountPath: /csi
             - name: kubelet-dir
               mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
             - name: dev
               mountPath: /dev
+            - name: run-udev
+              mountPath: /run/udev
+              readOnly: true
       volumes:
         - name: data-root
           hostPath:
@@ -202,7 +223,7 @@ spec:
         - name: registration-dir
           hostPath:
             path: /var/lib/kubelet/plugins_registry
-            type: Directory
+            type: DirectoryOrCreate
         - name: kubelet-dir
           hostPath:
             path: /var/lib/kubelet
@@ -211,13 +232,17 @@ spec:
           hostPath:
             path: /dev
             type: Directory
+        - name: run-udev
+          hostPath:
+            path: /run/udev
+            type: DirectoryOrCreate
 ---
 apiVersion: storage.k8s.io/v1
 kind: CSIDriver
 metadata:
   name: local-block-storage-csi
 spec:
-  attachRequired: false
+  attachRequired: true
   podInfoOnMount: false
   volumeLifecycleModes:
     - Persistent
