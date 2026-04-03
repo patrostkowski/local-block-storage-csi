@@ -202,6 +202,7 @@ func (d *Driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCa
 	return &csi.ControllerGetCapabilitiesResponse{
 		Capabilities: []*csi.ControllerServiceCapability{
 			d.ctrlCap(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME),
+			d.ctrlCap(csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME),
 		},
 	}, nil
 }
@@ -212,12 +213,50 @@ func (d *Driver) GetCapacity(context.Context, *csi.GetCapacityRequest) (*csi.Get
 	}, nil
 }
 
-func (d *Driver) ControllerPublishVolume(context.Context, *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "attach not supported for local loop-backed volumes")
+func (d *Driver) ControllerPublishVolume(
+	ctx context.Context,
+	req *csi.ControllerPublishVolumeRequest,
+) (*csi.ControllerPublishVolumeResponse, error) {
+	if d.cfg.Mode != "controller" {
+		return nil, status.Error(codes.Unimplemented, "controller service not enabled")
+	}
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "missing volume_id")
+	}
+	if req.GetNodeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "missing node_id")
+	}
+	if req.GetVolumeCapability() == nil {
+		return nil, status.Error(codes.InvalidArgument, "missing volume_capability")
+	}
+
+	state, err := d.loadVolumeStateByID(req.GetVolumeId())
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "load volume state: %v", err)
+	}
+	if state.NodeID != req.GetNodeId() {
+		return nil, status.Errorf(codes.FailedPrecondition, "volume belongs to node %q, requested node %q", state.NodeID, req.GetNodeId())
+	}
+
+	// no real attach needed; confirm placement and return success
+	return &csi.ControllerPublishVolumeResponse{
+		PublishContext: map[string]string{},
+	}, nil
 }
-func (d *Driver) ControllerUnpublishVolume(context.Context, *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "attach not supported for local loop-backed volumes")
+
+func (d *Driver) ControllerUnpublishVolume(
+	ctx context.Context,
+	req *csi.ControllerUnpublishVolumeRequest,
+) (*csi.ControllerUnpublishVolumeResponse, error) {
+	if d.cfg.Mode != "controller" {
+		return nil, status.Error(codes.Unimplemented, "controller service not enabled")
+	}
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "missing volume_id")
+	}
+	return &csi.ControllerUnpublishVolumeResponse{}, nil
 }
+
 func (d *Driver) ListVolumes(context.Context, *csi.ListVolumesRequest) (*csi.ListVolumesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "not implemented")
 }
