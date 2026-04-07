@@ -202,7 +202,6 @@ func (d *Driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCa
 	return &csi.ControllerGetCapabilitiesResponse{
 		Capabilities: []*csi.ControllerServiceCapability{
 			d.ctrlCap(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME),
-			d.ctrlCap(csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME),
 		},
 	}, nil
 }

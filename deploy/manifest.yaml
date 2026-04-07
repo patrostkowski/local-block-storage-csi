@@ -97,17 +97,6 @@ spec:
     spec:
       serviceAccountName: local-block-storage-csi-manager
       containers:
-        - name: csi-attacher
-          image: registry.k8s.io/sig-storage/csi-attacher:v4.6.1
-          imagePullPolicy: IfNotPresent
-          args:
-            - --csi-address=/csi/csi.sock
-            - --leader-election
-            - --leader-election-namespace=local-block-storage-csi
-            - --v=2
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /csi
         - name: csi-provisioner
           image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
           imagePullPolicy: IfNotPresent
@@ -242,7 +231,7 @@ kind: CSIDriver
 metadata:
   name: local-block-storage-csi
 spec:
-  attachRequired: true
+  attachRequired: false
   podInfoOnMount: false
   volumeLifecycleModes:
     - Persistent
