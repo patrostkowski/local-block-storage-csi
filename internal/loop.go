@@ -52,6 +52,11 @@ func (d *Driver) ensureLoopDevice(backingFile string) (string, error) {
 }
 
 func (d *Driver) findLoopDeviceByBackingFile(backingFile string) (string, error) {
+	var st unix.Stat_t
+	if err := unix.Stat(backingFile, &st); err != nil {
+		return "", err
+	}
+
 	paths, err := filepath.Glob("/dev/loop*")
 	if err != nil {
 		return "", err
@@ -66,10 +71,10 @@ func (d *Driver) findLoopDeviceByBackingFile(backingFile string) (string, error)
 		}
 		info, err := losetup.New(loopNumber, os.O_RDONLY).GetInfo()
 		if err != nil {
+			klog.Warningf("get loop device info failed path=%s: %v", path, err)
 			continue
 		}
-		fileName := strings.TrimRight(string(info.FileName[:]), "\x00")
-		if fileName == backingFile {
+		if info.INode == st.Ino && info.Device == st.Dev {
 			return losetup.New(loopNumber, os.O_RDONLY).Path(), nil
 		}
 	}
@@ -130,6 +135,17 @@ func (d *Driver) cleanupStaleLoopDevicesLocked() error {
 		return err
 	}
 
+	// Build inode index from known backing files to handle 64-byte path truncation
+	// in loop device info (LOOP_GET_STATUS64 returns at most 64 bytes for the file name).
+	knownInodes := map[string]struct{}{}
+	for path := range knownBackingFiles {
+		var st unix.Stat_t
+		if err := unix.Stat(path, &st); err == nil {
+			key := fmt.Sprintf("%d:%d", st.Dev, st.Ino)
+			knownInodes[key] = struct{}{}
+		}
+	}
+
 	paths, err := filepath.Glob("/dev/loop*")
 	if err != nil {
 		return err
@@ -144,6 +160,7 @@ func (d *Driver) cleanupStaleLoopDevicesLocked() error {
 		}
 		info, err := losetup.New(loopNumber, os.O_RDONLY).GetInfo()
 		if err != nil {
+			klog.Warningf("get loop device info failed path=%s: %v", path, err)
 			continue
 		}
 		backingFile := strings.TrimRight(string(info.FileName[:]), "\x00")
@@ -153,7 +170,13 @@ func (d *Driver) cleanupStaleLoopDevicesLocked() error {
 		if !strings.HasPrefix(backingFile, d.cfg.DataRoot+string(os.PathSeparator)) {
 			continue
 		}
+
 		if _, ok := knownBackingFiles[backingFile]; ok {
+			continue
+		}
+		// Path comparison failed (likely truncated). Check by inode.
+		inodeKey := fmt.Sprintf("%d:%d", info.Device, info.INode)
+		if _, ok := knownInodes[inodeKey]; ok {
 			continue
 		}
 

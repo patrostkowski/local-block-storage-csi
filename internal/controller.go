@@ -60,7 +60,10 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, status.Errorf(codes.InvalidArgument, "cannot choose target node: %v", err)
 	}
 
-	if existing, ok := d.findVolumeByName(req.GetName()); ok {
+	d.nameMu.Lock()
+	existing, found := d.findVolumeByName(req.GetName())
+	if found {
+		d.nameMu.Unlock()
 		klog.Infof("CreateVolume idempotent hit name=%s volumeID=%s", req.GetName(), existing.VolumeID)
 		if existing.NodeID != nodeID {
 			return nil, status.Errorf(codes.AlreadyExists, "volume %q already exists on node %q, requested node %q",
@@ -86,6 +89,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	klog.Infof("CreateVolume allocate volumeID=%s nodeID=%s backingFile=%s size=%d", volumeID, nodeID, backingFile, capBytes)
 
 	if err := d.createSparseFile(backingFile, capBytes); err != nil {
+		d.nameMu.Unlock()
 		return nil, status.Errorf(codes.Internal, "create sparse file: %v", err)
 	}
 
@@ -97,11 +101,17 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		PublishedTo:   map[string]string{},
 	}
 	if err := d.saveVolumeStateByID(state); err != nil {
+		d.nameMu.Unlock()
+		os.Remove(backingFile)
 		return nil, status.Errorf(codes.Internal, "persist volume state: %v", err)
 	}
 	if err := d.saveNameIndex(req.GetName(), volumeID); err != nil {
+		d.nameMu.Unlock()
+		os.Remove(d.volumeStatePath(volumeID))
+		os.Remove(backingFile)
 		return nil, status.Errorf(codes.Internal, "persist name index: %v", err)
 	}
+	d.nameMu.Unlock()
 
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{

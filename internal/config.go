@@ -44,7 +44,8 @@ type volumeState struct {
 type Driver struct {
 	cfg Config
 
-	mu sync.Mutex
+	mu     sync.Mutex
+	nameMu sync.Mutex
 
 	lastLoopCleanup time.Time
 
