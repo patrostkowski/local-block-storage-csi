@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/klog/v2"
 )
 
 func (d *Driver) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
@@ -73,6 +74,17 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Errorf(codes.Internal, "backing file is a directory: %s", state.BackingFile)
 	}
 
+	if state.LoopDevice == "" {
+		loopDevice, loopErr := d.ensureLoopDevice(state.BackingFile)
+		if loopErr != nil {
+			return nil, status.Errorf(codes.Internal, "ensure loop device: %v", loopErr)
+		}
+		state.LoopDevice = loopDevice
+		if deviceSymlink, symlinkErr := d.EnsureDeviceSymlink(state.VolumeID, loopDevice); symlinkErr == nil {
+			state.DeviceSymlink = deviceSymlink
+		}
+	}
+
 	state.StagedPath = req.GetStagingTargetPath()
 	state.StagedDevicePath = ""
 
@@ -107,8 +119,30 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 		}
 	}
 
+	if state.LoopDevice != "" {
+		loopNumber, err := d.loopDeviceNumber(state.LoopDevice)
+		if err != nil {
+			klog.Warningf("NodeUnstageVolume failed to parse loop device %s volumeID=%s: %v", state.LoopDevice, state.VolumeID, err)
+		} else if detachErr := d.losetupDeviceDetach(loopNumber); detachErr != nil && !errors.Is(detachErr, unix.EBUSY) {
+			klog.Warningf("NodeUnstageVolume failed to detach loop device %s volumeID=%s: %v", state.LoopDevice, state.VolumeID, detachErr)
+		}
+		state.LoopDevice = ""
+		state.DeviceSymlink = ""
+		if removeErr := d.RemoveDeviceSymlink(state.VolumeID); removeErr != nil {
+			klog.Warningf("NodeUnstageVolume failed removing device symlink volumeID=%s: %v", state.VolumeID, removeErr)
+		}
+	}
+
 	state.StagedPath = ""
 	state.StagedDevicePath = ""
+
+	if state.BackingFile != "" {
+		if _, statErr := os.Stat(state.BackingFile); os.IsNotExist(statErr) {
+			_ = os.Remove(d.volumeStatePath(state.VolumeID))
+			klog.Infof("NodeUnstageVolume cleaned up state for deleted volume volumeID=%s", state.VolumeID)
+			return &csi.NodeUnstageVolumeResponse{}, nil
+		}
+	}
 
 	if err := d.saveVolumeStateByID(state); err != nil {
 		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
@@ -150,9 +184,15 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Errorf(codes.Internal, "backing file is a directory: %s", state.BackingFile)
 	}
 
-	loopDevice, err := d.ensureLoopDevice(state.BackingFile)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "ensure loop device: %v", err)
+	loopDevice := state.LoopDevice
+	if loopDevice == "" {
+		loopDevice, _ = d.findLoopDeviceByBackingFile(state.BackingFile)
+	}
+	if loopDevice == "" {
+		loopDevice, err = d.ensureLoopDevice(state.BackingFile)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "ensure loop device: %v", err)
+		}
 	}
 
 	if err := d.publishBlockAtTarget(loopDevice, req.GetTargetPath()); err != nil {
@@ -212,21 +252,6 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	if len(state.PublishedTo) != 0 {
 		_ = d.saveVolumeStateByID(state)
 		return &csi.NodeUnpublishVolumeResponse{}, nil
-	}
-
-	detached, detachErr := d.detachLoopDeviceIfPresent(state.BackingFile)
-	if detachErr != nil {
-		return nil, status.Errorf(codes.Internal, "detach loop device: %v", detachErr)
-	}
-	if !detached {
-		_ = d.saveVolumeStateByID(state)
-		return &csi.NodeUnpublishVolumeResponse{}, nil
-	}
-
-	state.LoopDevice = ""
-	state.DeviceSymlink = ""
-	if removeErr := d.RemoveDeviceSymlink(state.VolumeID); removeErr != nil {
-		return nil, status.Errorf(codes.Internal, "remove device symlink: %v", removeErr)
 	}
 
 	_ = d.saveVolumeStateByID(state)

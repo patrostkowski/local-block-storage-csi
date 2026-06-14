@@ -38,6 +38,7 @@ func (d *Driver) ensureLoopDevice(backingFile string) (string, error) {
 		loopDevice, err := losetup.Attach(backingFile, 0, false)
 		if err == nil {
 			klog.Infof("attached loop device backingFile=%s loopDevice=%s", backingFile, loopDevice.Path())
+			_ = d.ensureNextLoopDeviceNode()
 			return loopDevice.Path(), nil
 		}
 		lastErr = err
@@ -52,6 +53,11 @@ func (d *Driver) ensureLoopDevice(backingFile string) (string, error) {
 }
 
 func (d *Driver) findLoopDeviceByBackingFile(backingFile string) (string, error) {
+	var backingStat unix.Stat_t
+	if err := unix.Stat(backingFile, &backingStat); err != nil {
+		return "", nil
+	}
+
 	paths, err := filepath.Glob("/dev/loop*")
 	if err != nil {
 		return "", err
@@ -68,8 +74,7 @@ func (d *Driver) findLoopDeviceByBackingFile(backingFile string) (string, error)
 		if err != nil {
 			continue
 		}
-		fileName := strings.TrimRight(string(info.FileName[:]), "\x00")
-		if fileName == backingFile {
+		if info.Device == backingStat.Dev && info.INode == backingStat.Ino {
 			return losetup.New(loopNumber, os.O_RDONLY).Path(), nil
 		}
 	}
