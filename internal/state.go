@@ -50,6 +50,34 @@ func (d *Driver) deleteNameIndexByVolumeID(volumeID string) error {
 	return nil
 }
 
+func (d *Driver) snapshotStatePath(snapshotID string) string {
+	return filepath.Join(d.cfg.StateRoot, "snapshots", snapshotID+".json")
+}
+
+func (d *Driver) saveSnapshot(snap *Snapshot) error {
+	temporaryPath := d.snapshotStatePath(snap.SnapshotID) + ".tmp"
+	bytesData, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(temporaryPath, bytesData, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, d.snapshotStatePath(snap.SnapshotID))
+}
+
+func (d *Driver) loadSnapshot(snapshotID string) (*Snapshot, error) {
+	bytesData, err := os.ReadFile(d.snapshotStatePath(snapshotID))
+	if err != nil {
+		return nil, err
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(bytesData, &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
+
 func (d *Driver) saveVolumeStateByID(state *Volume) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()

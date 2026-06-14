@@ -1,0 +1,45 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: cirros-vm
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+  - metadata:
+      name: cirros-rootdisk
+    spec:
+      source:
+        registry:
+          url: "docker://quay.io/kubevirt/cirros-container-disk-demo:latest"
+      storage:
+        storageClassName: standard
+        # volumeMode: Block
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: cirros-vm
+    spec:
+      domain:
+        devices:
+          disks:
+          - disk:
+              bus: virtio
+            name: rootdisk
+          # - disk:
+          #     bus: virtio
+          #   name: extradisk
+        resources:
+          requests:
+            memory: 256Mi
+      volumes:
+      - dataVolume:
+          name: cirros-rootdisk
+        name: rootdisk
+      # - persistentVolumeClaim:
+      #     claimName: cirros-extra-disk
+      #   name: extradisk

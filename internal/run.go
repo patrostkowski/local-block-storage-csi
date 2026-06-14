@@ -19,6 +19,12 @@ func Run(cfg Config) error {
 	if err := os.MkdirAll(filepath.Join(cfg.StateRoot, "volumes"), 0o755); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Join(cfg.StateRoot, "snapshots"), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(cfg.DataRoot, "snapshots"), 0o755); err != nil {
+		return err
+	}
 	address, cleanup, err := ParseEndpoint(cfg.Endpoint)
 	if err != nil {
 		return err

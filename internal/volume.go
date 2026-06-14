@@ -148,7 +148,7 @@ func (v *Volume) Publish(targetPath string) error {
 		return fmt.Errorf("lstat target %s: %w", targetPath, statErr)
 	}
 
-	f, createErr := os.OpenFile(targetPath, os.O_CREATE, 0o600)
+	f, createErr := os.OpenFile(targetPath, os.O_CREATE, 0o660)
 	if createErr != nil {
 		return fmt.Errorf("create target file %s: %w", targetPath, createErr)
 	}

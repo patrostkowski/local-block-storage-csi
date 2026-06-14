@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ephemeral-test
+spec:
+  containers:
+  - name: test
+    image: busybox:1.36
+    command:
+    - sh
+    - -c
+    - |
+      stat /dev/blockdata
+      echo "block device ready at $(date) [$(blockdev --getsize64 /dev/blockdata 2>/dev/null || wc -c < /dev/blockdata) bytes]"
+      sleep 3600
+    volumeDevices:
+    - name: data
+      devicePath: /dev/blockdata
+  volumes:
+  - name: data
+    ephemeral:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-block-storage-csi
+          volumeMode: Block
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi

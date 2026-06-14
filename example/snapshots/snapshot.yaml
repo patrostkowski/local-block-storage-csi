@@ -1,0 +1,8 @@
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: lbsp-test-snap
+spec:
+  volumeSnapshotClassName: local-block-storage-csi
+  source:
+    persistentVolumeClaimName: lbsp-test-claim

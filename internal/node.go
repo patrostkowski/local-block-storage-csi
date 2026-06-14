@@ -36,6 +36,8 @@ func (d *Driver) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRe
 	return &csi.NodeGetCapabilitiesResponse{
 		Capabilities: []*csi.NodeServiceCapability{
 			d.nodeCap(csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME),
+			d.nodeCap(csi.NodeServiceCapability_RPC_EXPAND_VOLUME),
+			d.nodeCap(csi.NodeServiceCapability_RPC_GET_VOLUME_STATS),
 		},
 	}, nil
 }
@@ -124,7 +126,7 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 	}
 
 	if vol.BackingFile != "" {
-		if _, statErr := os.Stat(vol.BackingFile.Path()); os.IsNotExist(statErr) {
+		if _, statErr := os.Stat(vol.BackingFile.Path()); os.IsNotExist(statErr) || vol.Ephemeral {
 			vol.Delete()
 			klog.Infof("NodeUnstageVolume cleaned up state for deleted volume volumeID=%s", vol.VolumeID)
 			return &csi.NodeUnstageVolumeResponse{}, nil
@@ -152,9 +154,31 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Error(codes.InvalidArgument, "raw block capability required")
 	}
 
-	vol, err := d.loadAndValidateVolume(req.GetVolumeId())
+	isEphemeral := req.GetVolumeContext()["csi.storage.k8s.io/ephemeral"] == "true"
+
+	vol, err := d.loadVolumeStateByID(req.GetVolumeId())
 	if err != nil {
-		return nil, err
+		if isEphemeral && os.IsNotExist(err) {
+			capBytes := int64(1 << 30)
+			backingFile := filepath.Join(d.cfg.DataRoot, "volumes", req.GetVolumeId()+".img")
+			if createErr := d.createSparseFile(backingFile, capBytes); createErr != nil {
+				return nil, status.Errorf(codes.Internal, "create ephemeral backing file: %v", createErr)
+			}
+			vol = &Volume{
+				d:             d,
+				VolumeID:      req.GetVolumeId(),
+				BackingFile:   BackingFile(backingFile),
+				CapacityBytes: capBytes,
+				NodeID:        d.cfg.NodeID,
+				Ephemeral:     true,
+				PublishedTo:   map[string]LoopDevice{},
+			}
+			if saveErr := vol.Save(); saveErr != nil {
+				return nil, status.Errorf(codes.Internal, "save ephemeral volume: %v", saveErr)
+			}
+		} else {
+			return nil, status.Errorf(codes.NotFound, "load volume state: %v", err)
+		}
 	}
 
 	if err := vol.EnsureLoopDevice(); err != nil {
@@ -201,12 +225,48 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
 
-func (d *Driver) NodeExpandVolume(context.Context, *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "not implemented")
+func (d *Driver) NodeExpandVolume(_ context.Context, req *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {
+	if d.cfg.Mode != "node" {
+		return nil, status.Error(codes.Unimplemented, "node service not enabled")
+	}
+	vol, err := d.loadAndValidateVolume(req.GetVolumeId())
+	if err != nil {
+		return nil, err
+	}
+	if vol.LoopDevice == "" {
+		return &csi.NodeExpandVolumeResponse{CapacityBytes: vol.CapacityBytes}, nil
+	}
+	fd, openErr := unix.Open(vol.LoopDevice.Path(), unix.O_RDONLY, 0)
+	if openErr != nil {
+		return nil, status.Errorf(codes.Internal, "open loop device: %v", openErr)
+	}
+	defer unix.Close(fd)
+	// LOOP_SET_CAPACITY = 0x4C07
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), 0x4C07, 0); errno != 0 {
+		return nil, status.Errorf(codes.Internal, "loop set capacity ioctl: %v", errno)
+	}
+	return &csi.NodeExpandVolumeResponse{CapacityBytes: vol.CapacityBytes}, nil
 }
 
-func (d *Driver) NodeGetVolumeStats(context.Context, *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "not implemented")
+func (d *Driver) NodeGetVolumeStats(_ context.Context, req *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
+	vol, err := d.loadVolumeStateByID(req.GetVolumeId())
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "volume not found: %v", err)
+	}
+	stat, statErr := os.Stat(vol.BackingFile.Path())
+	if statErr != nil {
+		return nil, status.Errorf(codes.Internal, "stat backing file: %v", statErr)
+	}
+	condition := &csi.VolumeCondition{Abnormal: false, Message: "healthy"}
+	if vol.LoopDevice == "" {
+		condition = &csi.VolumeCondition{Abnormal: true, Message: "loop device not attached"}
+	}
+	return &csi.NodeGetVolumeStatsResponse{
+		Usage: []*csi.VolumeUsage{
+			{Unit: csi.VolumeUsage_BYTES, Total: stat.Size(), Used: stat.Size()},
+		},
+		VolumeCondition: condition,
+	}, nil
 }
 
 func (d *Driver) nodeCap(t csi.NodeServiceCapability_RPC_Type) *csi.NodeServiceCapability {

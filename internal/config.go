@@ -43,6 +43,7 @@ type Volume struct {
 	CapacityBytes int64                 `json:"capacityBytes"`
 	NodeID        string                `json:"nodeID"`
 	LoopDevice    LoopDevice            `json:"loopDevice,omitempty"`
+	Ephemeral     bool                  `json:"ephemeral,omitempty"`
 	PublishedTo   map[string]LoopDevice `json:"publishedTo,omitempty"`
 }
 
@@ -54,6 +55,14 @@ type Driver struct {
 	csi.UnimplementedIdentityServer
 	csi.UnimplementedControllerServer
 	csi.UnimplementedNodeServer
+}
+
+type Snapshot struct {
+	SnapshotID   string `json:"snapshotID"`
+	SourceVolume string `json:"sourceVolume"`
+	BackingFile  string `json:"backingFile"`
+	SizeBytes    int64  `json:"sizeBytes"`
+	CreatedAt    string `json:"createdAt"`
 }
 
 func New(cfg Config) *Driver {
