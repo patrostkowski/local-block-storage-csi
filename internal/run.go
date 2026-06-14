@@ -11,14 +11,12 @@ import (
 )
 
 func Run(cfg Config) error {
-	klog.Infof("starting driver mode=%s endpoint=%s dataRoot=%s stateRoot=%s", cfg.Mode, cfg.Endpoint, cfg.DataRoot, cfg.StateRoot)
+	klog.Infof("starting driver version=%s commit=%s built=%s tag=%s mode=%s endpoint=%s dataRoot=%s stateRoot=%s",
+		DriverVersion, GitCommit, BuildTime, GitTag, cfg.Mode, cfg.Endpoint, cfg.DataRoot, cfg.StateRoot)
 	if err := os.MkdirAll(filepath.Join(cfg.DataRoot, "volumes"), 0o755); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(cfg.StateRoot, "volumes"), 0o755); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(cfg.StateRoot, "publish"), 0o755); err != nil {
 		return err
 	}
 	address, cleanup, err := ParseEndpoint(cfg.Endpoint)

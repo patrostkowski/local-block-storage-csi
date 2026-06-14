@@ -31,7 +31,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&rootCfg.endpoint, "endpoint", internal.DefaultEndpoint, "CSI endpoint, e.g. unix:///csi/csi.sock")
 	rootCmd.PersistentFlags().StringVar(&rootCfg.dataRoot, "data-root", internal.DefaultDataRoot, "Host path used for backing files")
 	rootCmd.PersistentFlags().StringVar(&rootCfg.stateRoot, "state-root", internal.DefaultStateRoot, "Host path used for driver state")
-	rootCmd.PersistentFlags().BoolVar(&rootCfg.cleanup, "cleanup-loop-devices", true, "Detach stale loop devices on startup and periodic node requests")
+	rootCmd.PersistentFlags().BoolVar(&rootCfg.cleanup, "cleanup-loop-devices", true, "Detach stale loop devices on startup")
 	baseCfg := func() internal.Config {
 		return internal.Config{
 			Endpoint:           rootCfg.endpoint,

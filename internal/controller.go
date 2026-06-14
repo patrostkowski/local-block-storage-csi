@@ -66,6 +66,10 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 			return nil, status.Errorf(codes.AlreadyExists, "volume %q already exists on node %q, requested node %q",
 				req.GetName(), existing.NodeID, nodeID)
 		}
+		if existing.CapacityBytes != capBytes {
+			return nil, status.Errorf(codes.AlreadyExists, "volume %q already exists with capacity %d, requested %d",
+				req.GetName(), existing.CapacityBytes, capBytes)
+		}
 		return &csi.CreateVolumeResponse{
 			Volume: &csi.Volume{
 				VolumeId:      existing.VolumeID,
@@ -74,7 +78,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 					{Segments: map[string]string{TopologyKey: existing.NodeID}},
 				},
 				VolumeContext: map[string]string{
-					"backingFile": existing.BackingFile,
+					"backingFile": existing.BackingFile.Path(),
 					"nodeID":      existing.NodeID,
 				},
 			},
@@ -89,14 +93,15 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, status.Errorf(codes.Internal, "create sparse file: %v", err)
 	}
 
-	state := &volumeState{
+	vol := &Volume{
+		d:             d,
 		VolumeID:      volumeID,
-		BackingFile:   backingFile,
+		BackingFile:   BackingFile(backingFile),
 		CapacityBytes: capBytes,
 		NodeID:        nodeID,
-		PublishedTo:   map[string]string{},
+		PublishedTo:   map[string]LoopDevice{},
 	}
-	if err := d.saveVolumeStateByID(state); err != nil {
+	if err := vol.Save(); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist volume state: %v", err)
 	}
 	if err := d.saveNameIndex(req.GetName(), volumeID); err != nil {
@@ -127,7 +132,7 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 		return nil, status.Error(codes.InvalidArgument, "missing volume_id")
 	}
 
-	state, err := d.loadVolumeStateByID(req.GetVolumeId())
+	vol, err := d.loadVolumeStateByID(req.GetVolumeId())
 	if err != nil {
 		if os.IsNotExist(err) {
 			klog.Infof("DeleteVolume volumeID=%s already deleted", req.GetVolumeId())
@@ -136,16 +141,9 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 		return nil, status.Errorf(codes.Internal, "load state: %v", err)
 	}
 
-	if state.BackingFile != "" {
-		if err := os.Remove(state.BackingFile); err != nil && !os.IsNotExist(err) {
-			return nil, status.Errorf(codes.Internal, "remove backing file %s: %v", state.BackingFile, err)
-		}
-	}
+	vol.Delete()
 	_ = d.deleteNameIndexByVolumeID(req.GetVolumeId())
-	if err := d.RemoveDeviceSymlink(req.GetVolumeId()); err != nil {
-		klog.Warningf("DeleteVolume failed removing device symlink volumeID=%s: %v", req.GetVolumeId(), err)
-	}
-	klog.Infof("DeleteVolume cleaned volumeID=%s backingFile=%s", req.GetVolumeId(), state.BackingFile)
+	klog.Infof("DeleteVolume cleaned volumeID=%s backingFile=%s", req.GetVolumeId(), vol.BackingFile)
 
 	return &csi.DeleteVolumeResponse{}, nil
 }

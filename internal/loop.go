@@ -8,53 +8,66 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	losetup "github.com/freddierice/go-losetup/v2"
 	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
 )
 
-func (d *Driver) ensureLoopDevice(backingFile string) (string, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+func (d BackingFile) Path() string { return string(d) }
 
-	if devicePath, err := d.findLoopDeviceByBackingFile(backingFile); err != nil {
-		return "", fmt.Errorf("scan loop devices: %v", err)
-	} else if devicePath != "" {
-		klog.Infof("reuse loop device backingFile=%s loopDevice=%s", backingFile, devicePath)
-		return devicePath, nil
+func (d BackingFile) DevInode() (uint64, uint64, error) {
+	var stat unix.Stat_t
+	if err := unix.Stat(d.Path(), &stat); err != nil {
+		return 0, 0, err
 	}
-
-	if count, err := d.countLoopDevices(); err == nil && count == 0 {
-		if err := d.ensureNextLoopDeviceNode(); err != nil {
-			return "", fmt.Errorf("ensure loop device node: %w", err)
-		}
-	}
-
-	const maxAttachAttempts = 10
-	var lastErr error
-	for attemptIndex := 0; attemptIndex < maxAttachAttempts; attemptIndex++ {
-		loopDevice, err := losetup.Attach(backingFile, 0, false)
-		if err == nil {
-			klog.Infof("attached loop device backingFile=%s loopDevice=%s", backingFile, loopDevice.Path())
-			_ = d.ensureNextLoopDeviceNode()
-			return loopDevice.Path(), nil
-		}
-		lastErr = err
-		if ensureErr := d.ensureNextLoopDeviceNode(); ensureErr != nil {
-			break
-		}
-	}
-	if count, countErr := d.countLoopDevices(); countErr == nil && count == 0 {
-		return "", fmt.Errorf("attach loop device: %w (no /dev/loopN devices found; ensure loop module is loaded and device nodes exist)", lastErr)
-	}
-	return "", fmt.Errorf("attach loop device: %w", lastErr)
+	return stat.Dev, stat.Ino, nil
 }
 
-func (d *Driver) findLoopDeviceByBackingFile(backingFile string) (string, error) {
-	var backingStat unix.Stat_t
-	if err := unix.Stat(backingFile, &backingStat); err != nil {
+func (d LoopDevice) Path() string { return string(d) }
+
+func (d LoopDevice) Number() (uint64, error) {
+	base := filepath.Base(d.Path())
+	if !strings.HasPrefix(base, "loop") {
+		return 0, fmt.Errorf("not a loop device path: %s", d.Path())
+	}
+	numStr := strings.TrimPrefix(base, "loop")
+	if numStr == "" {
+		return 0, fmt.Errorf("missing loop device number: %s", d.Path())
+	}
+	return strconv.ParseUint(numStr, 10, 64)
+}
+
+func (d LoopDevice) Info() (*losetup.Info, error) {
+	n, err := d.Number()
+	if err != nil {
+		return nil, err
+	}
+	info, err := losetup.New(n, os.O_RDONLY).GetInfo()
+	if err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+func (d LoopDevice) Detach() error {
+	n, err := d.Number()
+	if err != nil {
+		return Addf(ErrInvalid, "parse loop device %s", d.Path())
+	}
+	detachErr := losetup.New(n, os.O_RDONLY).Detach()
+	if detachErr != nil {
+		if errors.Is(detachErr, unix.EBUSY) {
+			return ErrBusy
+		}
+		return Addf(detachErr, "detach %s", d.Path())
+	}
+	return nil
+}
+
+func (d *Driver) findLoopDeviceByBackingFile(backingFile BackingFile) (LoopDevice, error) {
+	dev, ino, err := backingFile.DevInode()
+	if err != nil {
 		return "", nil
 	}
 
@@ -66,35 +79,16 @@ func (d *Driver) findLoopDeviceByBackingFile(backingFile string) (string, error)
 		if path == "/dev/loop-control" {
 			continue
 		}
-		loopNumber, err := d.loopDeviceNumber(path)
+		ld := LoopDevice(path)
+		info, err := ld.Info()
 		if err != nil {
 			continue
 		}
-		info, err := losetup.New(loopNumber, os.O_RDONLY).GetInfo()
-		if err != nil {
-			continue
-		}
-		if info.Device == backingStat.Dev && info.INode == backingStat.Ino {
-			return losetup.New(loopNumber, os.O_RDONLY).Path(), nil
+		if info.Device == dev && info.INode == ino {
+			return ld, nil
 		}
 	}
 	return "", nil
-}
-
-func (d *Driver) loopDeviceNumber(path string) (uint64, error) {
-	base := filepath.Base(path)
-	if !strings.HasPrefix(base, "loop") {
-		return 0, fmt.Errorf("not a loop device path: %s", path)
-	}
-	numStr := strings.TrimPrefix(base, "loop")
-	if numStr == "" {
-		return 0, fmt.Errorf("missing loop device number: %s", path)
-	}
-	return strconv.ParseUint(numStr, 10, 64)
-}
-
-func (d *Driver) losetupDeviceDetach(loopNumber uint64) error {
-	return losetup.New(loopNumber, os.O_RDONLY).Detach()
 }
 
 func (d *Driver) CleanupLoopDevices() error {
@@ -104,25 +98,11 @@ func (d *Driver) CleanupLoopDevices() error {
 	return d.cleanupStaleLoopDevicesLocked()
 }
 
-func (d *Driver) maybeRunLoopCleanup(reason string) {
-	if !d.cfg.CleanupLoopDevices {
-		return
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
-
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	now := time.Now()
-	if !d.lastLoopCleanup.IsZero() && now.Sub(d.lastLoopCleanup) < d.cfg.LoopCleanupMinInterval {
-		return
-	}
-
-	if err := d.cleanupStaleLoopDevicesLocked(); err != nil {
-		klog.Warningf("loop cleanup failed reason=%s: %v", reason, err)
-		return
-	}
-	d.lastLoopCleanup = now
-	klog.V(4).Infof("loop cleanup completed reason=%s", reason)
+	return nil
 }
 
 func (d *Driver) cleanupStaleLoopDevicesLocked() error {
@@ -143,11 +123,8 @@ func (d *Driver) cleanupStaleLoopDevicesLocked() error {
 		if path == "/dev/loop-control" {
 			continue
 		}
-		loopNumber, err := d.loopDeviceNumber(path)
-		if err != nil {
-			continue
-		}
-		info, err := losetup.New(loopNumber, os.O_RDONLY).GetInfo()
+		loopDevice := LoopDevice(path)
+		info, err := loopDevice.Info()
 		if err != nil {
 			continue
 		}
@@ -158,14 +135,14 @@ func (d *Driver) cleanupStaleLoopDevicesLocked() error {
 		if !strings.HasPrefix(backingFile, d.cfg.DataRoot+string(os.PathSeparator)) {
 			continue
 		}
-		if _, ok := knownBackingFiles[backingFile]; ok {
+		if _, ok := knownBackingFiles[BackingFile(backingFile)]; ok {
 			continue
 		}
 
 		if _, err := os.Stat(backingFile); err != nil {
 			if os.IsNotExist(err) {
 				klog.Warningf("detaching stale loop device: path=%s backingFile=%s reason=missing_backing_file", path, backingFile)
-				if detachErr := losetup.New(loopNumber, os.O_RDONLY).Detach(); detachErr != nil && !errors.Is(detachErr, unix.EBUSY) {
+				if detachErr := loopDevice.Detach(); detachErr != nil && !errors.Is(detachErr, ErrBusy) {
 					klog.Warningf("failed detaching stale loop device path=%s backingFile=%s: %v", path, backingFile, detachErr)
 				}
 			}
@@ -199,7 +176,7 @@ func (d *Driver) ensureNextLoopDeviceNode() error {
 	used := map[uint64]struct{}{}
 	max := uint64(0)
 	for _, path := range paths {
-		loopNumber, err := d.loopDeviceNumber(path)
+		loopNumber, err := LoopDevice(path).Number()
 		if err != nil {
 			continue
 		}
@@ -232,8 +209,8 @@ func (d *Driver) ensureNextLoopDeviceNode() error {
 	return os.Chown(path, 0, 0)
 }
 
-func (d *Driver) loadKnownBackingFiles() (map[string]struct{}, error) {
-	knownBackingFiles := map[string]struct{}{}
+func (d *Driver) loadKnownBackingFiles() (map[BackingFile]struct{}, error) {
+	knownBackingFiles := map[BackingFile]struct{}{}
 	paths, err := filepath.Glob(filepath.Join(d.cfg.StateRoot, "volumes", "*.json"))
 	if err != nil {
 		return nil, err
@@ -243,7 +220,7 @@ func (d *Driver) loadKnownBackingFiles() (map[string]struct{}, error) {
 		if err != nil {
 			continue
 		}
-		var state volumeState
+		var state Volume
 		if err := json.Unmarshal(bytesData, &state); err != nil {
 			continue
 		}
