@@ -2,7 +2,6 @@ package internal
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,6 +40,27 @@ func (d *Driver) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRe
 	}, nil
 }
 
+func (d *Driver) loadAndValidateVolume(volumeID string) (*Volume, error) {
+	state, err := d.loadVolumeStateByID(volumeID)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "load volume state: %v", err)
+	}
+	if state.NodeID != d.cfg.NodeID {
+		return nil, status.Errorf(codes.FailedPrecondition, "volume belongs to node %q, this node is %q", state.NodeID, d.cfg.NodeID)
+	}
+	if state.BackingFile == "" {
+		return nil, status.Error(codes.FailedPrecondition, "backing file is empty")
+	}
+	info, err := os.Stat(state.BackingFile.Path())
+	if err != nil {
+		return nil, status.Error(StatusCode(err), err.Error())
+	}
+	if info.IsDir() {
+		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("backing file is a directory: %s", state.BackingFile.Path()))
+	}
+	return state, nil
+}
+
 func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
 	if d.cfg.Mode != "node" {
 		return nil, status.Error(codes.Unimplemented, "node service not enabled")
@@ -55,40 +75,17 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Error(codes.InvalidArgument, "raw block capability required")
 	}
 
-	state, err := d.loadVolumeStateByID(req.GetVolumeId())
+	vol, err := d.loadAndValidateVolume(req.GetVolumeId())
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "load volume state: %v", err)
-	}
-	if state.NodeID != d.cfg.NodeID {
-		return nil, status.Errorf(codes.FailedPrecondition, "volume belongs to node %q, this node is %q", state.NodeID, d.cfg.NodeID)
+		return nil, err
 	}
 
-	if state.BackingFile == "" {
-		return nil, status.Error(codes.FailedPrecondition, "backing file is empty")
+	if err := vol.EnsureLoopDevice(); err != nil {
+		return nil, status.Error(StatusCode(err), err.Error())
 	}
-	info, err := os.Stat(state.BackingFile)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "backing file missing: %v", err)
-	}
-	if info.IsDir() {
-		return nil, status.Errorf(codes.Internal, "backing file is a directory: %s", state.BackingFile)
-	}
+	vol.Symlink()
 
-	if state.LoopDevice == "" {
-		loopDevice, loopErr := d.ensureLoopDevice(state.BackingFile)
-		if loopErr != nil {
-			return nil, status.Errorf(codes.Internal, "ensure loop device: %v", loopErr)
-		}
-		state.LoopDevice = loopDevice
-		if deviceSymlink, symlinkErr := d.EnsureDeviceSymlink(state.VolumeID, loopDevice); symlinkErr == nil {
-			state.DeviceSymlink = deviceSymlink
-		}
-	}
-
-	state.StagedPath = req.GetStagingTargetPath()
-	state.StagedDevicePath = ""
-
-	if err := d.saveVolumeStateByID(state); err != nil {
+	if err := vol.Save(); err != nil {
 		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
 	}
 
@@ -103,7 +100,7 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 		return nil, status.Error(codes.InvalidArgument, "missing volume_id")
 	}
 
-	state, err := d.loadVolumeStateByID(req.GetVolumeId())
+	vol, err := d.loadVolumeStateByID(req.GetVolumeId())
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &csi.NodeUnstageVolumeResponse{}, nil
@@ -111,40 +108,30 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 		return nil, status.Errorf(codes.Internal, "load volume state: %v", err)
 	}
 
-	if state.PublishedTo != nil {
-		for targetPath := range state.PublishedTo {
-			if _, err := os.Stat(targetPath); err != nil && os.IsNotExist(err) {
-				delete(state.PublishedTo, targetPath)
+	if vol.PublishedTo != nil {
+		for targetPath := range vol.PublishedTo {
+			if _, statErr := os.Stat(targetPath); statErr != nil && os.IsNotExist(statErr) {
+				delete(vol.PublishedTo, targetPath)
 			}
 		}
 	}
 
-	if state.LoopDevice != "" {
-		loopNumber, err := d.loopDeviceNumber(state.LoopDevice)
-		if err != nil {
-			klog.Warningf("NodeUnstageVolume failed to parse loop device %s volumeID=%s: %v", state.LoopDevice, state.VolumeID, err)
-		} else if detachErr := d.losetupDeviceDetach(loopNumber); detachErr != nil && !errors.Is(detachErr, unix.EBUSY) {
-			klog.Warningf("NodeUnstageVolume failed to detach loop device %s volumeID=%s: %v", state.LoopDevice, state.VolumeID, detachErr)
-		}
-		state.LoopDevice = ""
-		state.DeviceSymlink = ""
-		if removeErr := d.RemoveDeviceSymlink(state.VolumeID); removeErr != nil {
-			klog.Warningf("NodeUnstageVolume failed removing device symlink volumeID=%s: %v", state.VolumeID, removeErr)
-		}
+	if detachErr := vol.DetachLoopDevice(); detachErr != nil {
+		klog.Warningf("NodeUnstageVolume failed to detach loop device volumeID=%s: %v", vol.VolumeID, detachErr)
+	}
+	if removeErr := vol.RemoveSymlink(); removeErr != nil {
+		klog.Warningf("NodeUnstageVolume failed removing device symlink volumeID=%s: %v", vol.VolumeID, removeErr)
 	}
 
-	state.StagedPath = ""
-	state.StagedDevicePath = ""
-
-	if state.BackingFile != "" {
-		if _, statErr := os.Stat(state.BackingFile); os.IsNotExist(statErr) {
-			_ = os.Remove(d.volumeStatePath(state.VolumeID))
-			klog.Infof("NodeUnstageVolume cleaned up state for deleted volume volumeID=%s", state.VolumeID)
+	if vol.BackingFile != "" {
+		if _, statErr := os.Stat(vol.BackingFile.Path()); os.IsNotExist(statErr) {
+			vol.Delete()
+			klog.Infof("NodeUnstageVolume cleaned up state for deleted volume volumeID=%s", vol.VolumeID)
 			return &csi.NodeUnstageVolumeResponse{}, nil
 		}
 	}
 
-	if err := d.saveVolumeStateByID(state); err != nil {
+	if err := vol.Save(); err != nil {
 		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
 	}
 
@@ -165,50 +152,22 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Error(codes.InvalidArgument, "raw block capability required")
 	}
 
-	state, err := d.loadVolumeStateByID(req.GetVolumeId())
+	vol, err := d.loadAndValidateVolume(req.GetVolumeId())
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "load volume state: %v", err)
-	}
-	if state.NodeID != d.cfg.NodeID {
-		return nil, status.Errorf(codes.FailedPrecondition, "volume belongs to node %q, this node is %q", state.NodeID, d.cfg.NodeID)
-	}
-	if state.BackingFile == "" {
-		return nil, status.Error(codes.FailedPrecondition, "backing file is empty")
+		return nil, err
 	}
 
-	info, err := os.Stat(state.BackingFile)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "stat backing file %s: %v", state.BackingFile, err)
-	}
-	if info.IsDir() {
-		return nil, status.Errorf(codes.Internal, "backing file is a directory: %s", state.BackingFile)
+	if err := vol.EnsureLoopDevice(); err != nil {
+		return nil, status.Error(StatusCode(err), err.Error())
 	}
 
-	loopDevice := state.LoopDevice
-	if loopDevice == "" {
-		loopDevice, _ = d.findLoopDeviceByBackingFile(state.BackingFile)
-	}
-	if loopDevice == "" {
-		loopDevice, err = d.ensureLoopDevice(state.BackingFile)
-		if err != nil {
-			return nil, status.Errorf(codes.Internal, "ensure loop device: %v", err)
-		}
+	if err := vol.Publish(req.GetTargetPath()); err != nil {
+		return nil, status.Error(StatusCode(err), err.Error())
 	}
 
-	if err := d.publishBlockAtTarget(loopDevice, req.GetTargetPath()); err != nil {
-		return nil, status.Errorf(codes.Internal, "publish loop device: %v", err)
-	}
+	vol.Symlink()
 
-	if state.PublishedTo == nil {
-		state.PublishedTo = map[string]string{}
-	}
-	state.PublishedTo[req.GetTargetPath()] = loopDevice
-	state.LoopDevice = loopDevice
-	if deviceSymlink, symlinkErr := d.EnsureDeviceSymlink(state.VolumeID, loopDevice); symlinkErr == nil {
-		state.DeviceSymlink = deviceSymlink
-	}
-
-	if err := d.saveVolumeStateByID(state); err != nil {
+	if err := vol.Save(); err != nil {
 		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
 	}
 
@@ -226,58 +185,20 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 		return nil, status.Error(codes.InvalidArgument, "missing target_path")
 	}
 
-	if d.isMounted(req.GetTargetPath()) {
-		if err := unix.Unmount(req.GetTargetPath(), 0); err != nil {
-			return nil, status.Errorf(codes.Internal, "unmount target %s: %v", req.GetTargetPath(), err)
-		}
-	}
-
-	if err := os.Remove(req.GetTargetPath()); err != nil && !os.IsNotExist(err) {
-		return nil, status.Errorf(codes.Internal, "remove target %s: %v", req.GetTargetPath(), err)
-	}
-
-	state, err := d.loadVolumeStateByID(req.GetVolumeId())
-	if err != nil || state.PublishedTo == nil {
+	vol, err := d.loadVolumeStateByID(req.GetVolumeId())
+	if err != nil || vol.PublishedTo == nil {
 		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
 
-	delete(state.PublishedTo, req.GetTargetPath())
-
-	for targetPath := range state.PublishedTo {
-		if _, statErr := os.Stat(targetPath); statErr != nil && os.IsNotExist(statErr) {
-			delete(state.PublishedTo, targetPath)
-		}
+	if unpublishErr := vol.Unpublish(req.GetTargetPath()); unpublishErr != nil {
+		return nil, status.Error(StatusCode(unpublishErr), unpublishErr.Error())
 	}
 
-	if len(state.PublishedTo) != 0 {
-		_ = d.saveVolumeStateByID(state)
-		return &csi.NodeUnpublishVolumeResponse{}, nil
+	if saveErr := vol.Save(); saveErr != nil {
+		return nil, status.Errorf(codes.Internal, "save volume state: %v", saveErr)
 	}
-
-	_ = d.saveVolumeStateByID(state)
 
 	return &csi.NodeUnpublishVolumeResponse{}, nil
-}
-
-func (d *Driver) detachLoopDeviceIfPresent(backingFile string) (bool, error) {
-	loopDevice, findErr := d.findLoopDeviceByBackingFile(backingFile)
-	if findErr != nil || loopDevice == "" {
-		return true, nil
-	}
-
-	loopNumber, parseErr := d.loopDeviceNumber(loopDevice)
-	if parseErr != nil {
-		return true, nil
-	}
-
-	if detachErr := d.losetupDeviceDetach(loopNumber); detachErr != nil {
-		if errors.Is(detachErr, unix.EBUSY) {
-			return false, nil
-		}
-		return false, fmt.Errorf("%s: %w", loopDevice, detachErr)
-	}
-
-	return true, nil
 }
 
 func (d *Driver) NodeExpandVolume(context.Context, *csi.NodeExpandVolumeRequest) (*csi.NodeExpandVolumeResponse, error) {

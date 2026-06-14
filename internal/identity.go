@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 )
@@ -9,7 +10,7 @@ import (
 func (d *Driver) GetPluginInfo(context.Context, *csi.GetPluginInfoRequest) (*csi.GetPluginInfoResponse, error) {
 	return &csi.GetPluginInfoResponse{
 		Name:          DriverName,
-		VendorVersion: DriverVersion,
+		VendorVersion: fmt.Sprintf("%s-%s", DriverVersion, GitCommit),
 	}, nil
 }
 

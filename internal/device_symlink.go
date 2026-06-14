@@ -78,62 +78,10 @@ func (d *Driver) RemoveDeviceSymlink(volumeID string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(symlinkPath); err != nil && !os.IsNotExist(err) {
+	if err := removeIfExists(symlinkPath); err != nil {
 		return fmt.Errorf("remove symlink %s: %w", symlinkPath, err)
 	}
 	return nil
-}
-
-func (d *Driver) ResolveVolumeDevice(volumeID string) (string, error) {
-	symlinkPath, err := d.volumeDeviceSymlinkPath(volumeID)
-	if err != nil {
-		return "", err
-	}
-
-	target, readlinkErr := os.Readlink(symlinkPath)
-	if readlinkErr == nil {
-		resolved := target
-		if !filepath.IsAbs(resolved) {
-			resolved = filepath.Join(filepath.Dir(symlinkPath), resolved)
-		}
-		if _, statErr := os.Stat(resolved); statErr == nil {
-			return resolved, nil
-		}
-	}
-
-	state, stateErr := d.loadVolumeStateByID(volumeID)
-	if stateErr != nil {
-		if readlinkErr != nil {
-			return "", fmt.Errorf("read volume symlink %s: %w", symlinkPath, readlinkErr)
-		}
-		return "", fmt.Errorf("load volume state %s: %w", volumeID, stateErr)
-	}
-
-	if state.LoopDevice != "" {
-		if _, statErr := os.Stat(state.LoopDevice); statErr == nil {
-			if _, ensureErr := d.EnsureDeviceSymlink(volumeID, state.LoopDevice); ensureErr != nil {
-				klog.Warningf("failed to refresh volume symlink volumeID=%s loopDevice=%s: %v", volumeID, state.LoopDevice, ensureErr)
-			}
-			return state.LoopDevice, nil
-		}
-	}
-
-	if state.BackingFile == "" {
-		return "", fmt.Errorf("volume %s has no backing file", volumeID)
-	}
-
-	loopDevice, findErr := d.findLoopDeviceByBackingFile(state.BackingFile)
-	if findErr != nil {
-		return "", fmt.Errorf("find loop device for %s: %w", state.BackingFile, findErr)
-	}
-	if loopDevice == "" {
-		return "", fmt.Errorf("no loop device found for volume %s backing file %s", volumeID, state.BackingFile)
-	}
-
-	if _, ensureErr := d.EnsureDeviceSymlink(volumeID, loopDevice); ensureErr != nil {
-		klog.Warningf("failed to refresh volume symlink volumeID=%s loopDevice=%s: %v", volumeID, loopDevice, ensureErr)
-	}
-	return loopDevice, nil
 }
 
 func (d *Driver) cleanupStaleVolumeSymlinksLocked(knownVolumeIDs map[string]struct{}) {
@@ -154,7 +102,7 @@ func (d *Driver) cleanupStaleVolumeSymlinksLocked(knownVolumeIDs map[string]stru
 
 		_, known := knownVolumeIDs[name]
 		if !known {
-			if err := os.Remove(symlinkPath); err != nil && !os.IsNotExist(err) {
+			if err := removeIfExists(symlinkPath); err != nil {
 				klog.Warningf("remove stale symlink %s: %v", symlinkPath, err)
 			}
 			continue
@@ -162,7 +110,7 @@ func (d *Driver) cleanupStaleVolumeSymlinksLocked(knownVolumeIDs map[string]stru
 
 		target, readErr := os.Readlink(symlinkPath)
 		if readErr != nil {
-			if err := os.Remove(symlinkPath); err != nil && !os.IsNotExist(err) {
+			if err := removeIfExists(symlinkPath); err != nil {
 				klog.Warningf("remove invalid symlink %s: %v", symlinkPath, err)
 			}
 			continue
@@ -173,7 +121,7 @@ func (d *Driver) cleanupStaleVolumeSymlinksLocked(knownVolumeIDs map[string]stru
 			resolved = filepath.Join(filepath.Dir(symlinkPath), resolved)
 		}
 		if _, statErr := os.Stat(resolved); statErr != nil {
-			if err := os.Remove(symlinkPath); err != nil && !os.IsNotExist(err) {
+			if err := removeIfExists(symlinkPath); err != nil {
 				klog.Warningf("remove broken symlink %s: %v", symlinkPath, err)
 			}
 		}
@@ -192,7 +140,7 @@ func (d *Driver) reconcileVolumeSymlinks() {
 		if readErr != nil {
 			continue
 		}
-		var state volumeState
+		var state Volume
 		if unmarshalErr := json.Unmarshal(bytesData, &state); unmarshalErr != nil {
 			continue
 		}
@@ -207,7 +155,7 @@ func (d *Driver) reconcileVolumeSymlinks() {
 		if loopDevice == "" {
 			loopDevice, err = d.findLoopDeviceByBackingFile(state.BackingFile)
 			if err != nil {
-				klog.Warningf("lookup loop device during symlink reconciliation volumeID=%s backingFile=%s: %v", state.VolumeID, state.BackingFile, err)
+				klog.Warningf("lookup loop device during symlink reconciliation volumeID=%s backingFile=%s: %v", state.VolumeID, state.BackingFile.Path(), err)
 				continue
 			}
 		}
@@ -215,8 +163,8 @@ func (d *Driver) reconcileVolumeSymlinks() {
 			continue
 		}
 
-		if _, ensureErr := d.EnsureDeviceSymlink(state.VolumeID, loopDevice); ensureErr != nil {
-			klog.Warningf("ensure volume symlink during startup reconciliation volumeID=%s loopDevice=%s: %v", state.VolumeID, loopDevice, ensureErr)
+		if _, ensureErr := d.EnsureDeviceSymlink(state.VolumeID, loopDevice.Path()); ensureErr != nil {
+			klog.Warningf("ensure volume symlink during startup reconciliation volumeID=%s loopDevice=%s: %v", state.VolumeID, loopDevice.Path(), ensureErr)
 		}
 	}
 }

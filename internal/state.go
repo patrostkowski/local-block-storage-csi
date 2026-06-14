@@ -20,7 +20,7 @@ func (d *Driver) saveNameIndex(name, volumeID string) error {
 	return os.WriteFile(d.nameIndexPath(name), []byte(volumeID), 0o600)
 }
 
-func (d *Driver) findVolumeByName(name string) (*volumeState, bool) {
+func (d *Driver) findVolumeByName(name string) (*Volume, bool) {
 	bytesData, err := os.ReadFile(d.nameIndexPath(name))
 	if err != nil {
 		return nil, false
@@ -50,7 +50,7 @@ func (d *Driver) deleteNameIndexByVolumeID(volumeID string) error {
 	return nil
 }
 
-func (d *Driver) saveVolumeStateByID(state *volumeState) error {
+func (d *Driver) saveVolumeStateByID(state *Volume) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -65,7 +65,7 @@ func (d *Driver) saveVolumeStateByID(state *volumeState) error {
 	return os.Rename(temporaryPath, d.volumeStatePath(state.VolumeID))
 }
 
-func (d *Driver) loadVolumeStateByID(volumeID string) (*volumeState, error) {
+func (d *Driver) loadVolumeStateByID(volumeID string) (*Volume, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -73,9 +73,10 @@ func (d *Driver) loadVolumeStateByID(volumeID string) (*volumeState, error) {
 	if err != nil {
 		return nil, err
 	}
-	var state volumeState
+	var state Volume
 	if err := json.Unmarshal(bytesData, &state); err != nil {
 		return nil, err
 	}
+	state.d = d
 	return &state, nil
 }
