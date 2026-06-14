@@ -87,6 +87,8 @@ metadata:
   namespace: local-block-storage-csi
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: local-block-storage-csi-manager
