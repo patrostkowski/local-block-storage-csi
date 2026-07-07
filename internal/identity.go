@@ -17,7 +17,7 @@ func (d *Driver) GetPluginInfo(context.Context, *csi.GetPluginInfoRequest) (*csi
 func (d *Driver) GetPluginCapabilities(context.Context, *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
 	var caps []*csi.PluginCapability
 
-	if d.cfg.Mode == "controller" {
+	if d.cfg.ControllerEnabled {
 		caps = append(caps, &csi.PluginCapability{
 			Type: &csi.PluginCapability_Service_{
 				Service: &csi.PluginCapability_Service{

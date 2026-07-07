@@ -11,8 +11,8 @@ import (
 )
 
 func Run(cfg Config) error {
-	klog.Infof("starting driver version=%s commit=%s built=%s tag=%s mode=%s endpoint=%s dataRoot=%s stateRoot=%s",
-		DriverVersion, GitCommit, BuildTime, GitTag, cfg.Mode, cfg.Endpoint, cfg.DataRoot, cfg.StateRoot)
+	klog.Infof("starting driver version=%s commit=%s built=%s tag=%s controller=%v node=%v endpoint=%s dataRoot=%s stateRoot=%s",
+		DriverVersion, GitCommit, BuildTime, GitTag, cfg.ControllerEnabled, cfg.NodeEnabled, cfg.Endpoint, cfg.DataRoot, cfg.StateRoot)
 	if err := os.MkdirAll(filepath.Join(cfg.DataRoot, "volumes"), 0o755); err != nil {
 		return err
 	}
@@ -33,7 +33,7 @@ func Run(cfg Config) error {
 
 	server := grpc.NewServer()
 	driverInstance := New(cfg)
-	if cfg.Mode == "node" {
+	if cfg.NodeEnabled {
 		if cfg.CleanupLoopDevices {
 			if err := driverInstance.CleanupLoopDevices(); err != nil {
 				klog.Warningf("loop device cleanup failed: %v", err)
@@ -42,20 +42,15 @@ func Run(cfg Config) error {
 		driverInstance.reconcileVolumeSymlinks()
 	}
 	csi.RegisterIdentityServer(server, driverInstance)
-	if cfg.Mode == "controller" {
+	if cfg.ControllerEnabled {
 		csi.RegisterControllerServer(server, driverInstance)
 	}
-	if cfg.Mode == "node" {
+	if cfg.NodeEnabled {
 		csi.RegisterNodeServer(server, driverInstance)
 	}
 
-	if cfg.Mode == "node" {
-		klog.Infof("%s %s listening on %s (mode=%s nodeID=%s)",
-			DriverName, DriverVersion, cfg.Endpoint, cfg.Mode, cfg.NodeID)
-	} else {
-		klog.Infof("%s %s listening on %s (mode=%s)",
-			DriverName, DriverVersion, cfg.Endpoint, cfg.Mode)
-	}
+	klog.Infof("%s %s listening on %s (controller=%v node=%v nodeID=%s)",
+		DriverName, DriverVersion, cfg.Endpoint, cfg.ControllerEnabled, cfg.NodeEnabled, cfg.NodeID)
 
 	return server.Serve(listener)
 }

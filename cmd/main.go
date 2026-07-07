@@ -3,8 +3,7 @@ package main
 import (
 	"flag"
 
-	"github.com/patrostkowski/local-block-storage-csi/cmd/manager"
-	"github.com/patrostkowski/local-block-storage-csi/cmd/node"
+	"github.com/patrostkowski/local-block-storage-csi/cmd/plugin"
 	"github.com/patrostkowski/local-block-storage-csi/internal"
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
@@ -42,8 +41,7 @@ func main() {
 		}
 	}
 
-	rootCmd.AddCommand(manager.NewCommand(baseCfg))
-	rootCmd.AddCommand(node.NewCommand(baseCfg))
+	rootCmd.AddCommand(plugin.NewCommand(baseCfg))
 
 	if err := rootCmd.Execute(); err != nil {
 		klog.Fatalf("command failed: %v", err)

@@ -15,7 +15,7 @@ import (
 )
 
 func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
-	if d.cfg.Mode != "controller" {
+	if !d.cfg.ControllerEnabled {
 		return nil, status.Error(codes.Unimplemented, "controller service not enabled")
 	}
 	if accessibility := req.GetAccessibilityRequirements(); accessibility != nil {
@@ -58,6 +58,9 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	nodeID, err := d.pickNodeFromAccessibility(req.GetAccessibilityRequirements())
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "cannot choose target node: %v", err)
+	}
+	if nodeID != d.cfg.NodeID {
+		return nil, status.Errorf(codes.Unavailable, "volume requested for node %q, this instance serves node %q", nodeID, d.cfg.NodeID)
 	}
 
 	if existing, ok := d.findVolumeByName(req.GetName()); ok {
@@ -124,7 +127,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 }
 
 func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
-	if d.cfg.Mode != "controller" {
+	if !d.cfg.ControllerEnabled {
 		return nil, status.Error(codes.Unimplemented, "controller service not enabled")
 	}
 	klog.Infof("DeleteVolume volumeID=%s", req.GetVolumeId())
@@ -174,7 +177,7 @@ func (d *Driver) ValidateVolumeCapabilities(_ context.Context, req *csi.Validate
 }
 
 func (d *Driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCapabilitiesRequest) (*csi.ControllerGetCapabilitiesResponse, error) {
-	if d.cfg.Mode != "controller" {
+	if !d.cfg.ControllerEnabled {
 		return nil, status.Error(codes.Unimplemented, "controller service not enabled")
 	}
 
@@ -195,7 +198,7 @@ func (d *Driver) ControllerPublishVolume(
 	ctx context.Context,
 	req *csi.ControllerPublishVolumeRequest,
 ) (*csi.ControllerPublishVolumeResponse, error) {
-	if d.cfg.Mode != "controller" {
+	if !d.cfg.ControllerEnabled {
 		return nil, status.Error(codes.Unimplemented, "controller service not enabled")
 	}
 	if req.GetVolumeId() == "" {
@@ -226,7 +229,7 @@ func (d *Driver) ControllerUnpublishVolume(
 	ctx context.Context,
 	req *csi.ControllerUnpublishVolumeRequest,
 ) (*csi.ControllerUnpublishVolumeResponse, error) {
-	if d.cfg.Mode != "controller" {
+	if !d.cfg.ControllerEnabled {
 		return nil, status.Error(codes.Unimplemented, "controller service not enabled")
 	}
 	if req.GetVolumeId() == "" {

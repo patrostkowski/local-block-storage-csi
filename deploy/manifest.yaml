@@ -6,12 +6,6 @@ metadata:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: local-block-storage-csi-manager
-  namespace: local-block-storage-csi
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
   name: local-block-storage-csi-node
   namespace: local-block-storage-csi
 ---
@@ -57,19 +51,6 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: local-block-storage-csi-manager
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: local-block-storage-csi
-subjects:
-  - kind: ServiceAccount
-    name: local-block-storage-csi-manager
-    namespace: local-block-storage-csi
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
   name: local-block-storage-csi-node
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -79,65 +60,6 @@ subjects:
   - kind: ServiceAccount
     name: local-block-storage-csi-node
     namespace: local-block-storage-csi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: local-block-storage-csi-manager
-  namespace: local-block-storage-csi
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: local-block-storage-csi-manager
-  template:
-    metadata:
-      labels:
-        app: local-block-storage-csi-manager
-    spec:
-      serviceAccountName: local-block-storage-csi-manager
-      containers:
-        - name: csi-provisioner
-          image: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
-          imagePullPolicy: IfNotPresent
-          args:
-            - --csi-address=/csi/csi.sock
-            - --leader-election
-            - --leader-election-namespace=local-block-storage-csi
-            - --feature-gates=Topology=true
-            - --strict-topology=true
-            - --v=2
-          volumeMounts:
-            - name: socket-dir
-              mountPath: /csi
-        - name: manager
-          image: docker.io/patrostkowski/local-block-storage-csi:latest
-          imagePullPolicy: IfNotPresent
-          args:
-            - manager
-            - --endpoint=unix:///csi/csi.sock
-            - --data-root=/var/lib/local-block-storage-csi
-            - --state-root=/var/lib/local-block-storage-csi/state
-          volumeMounts:
-            - name: data-root
-              mountPath: /var/lib/local-block-storage-csi
-            - name: state-root
-              mountPath: /var/lib/local-block-storage-csi/state
-            - name: socket-dir
-              mountPath: /csi
-      volumes:
-        - name: data-root
-          hostPath:
-            path: /var/lib/local-block-storage-csi
-            type: DirectoryOrCreate
-        - name: state-root
-          hostPath:
-            path: /var/lib/local-block-storage-csi/state
-            type: DirectoryOrCreate
-        - name: socket-dir
-          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -167,6 +89,24 @@ spec:
               mountPath: /csi
             - name: registration-dir
               mountPath: /registration
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          args:
+            - --csi-address=/csi/csi.sock
+            - --node-deployment=true
+            - --node-deployment-immediate-binding=false
+            - --feature-gates=Topology=true
+            - --strict-topology=true
+            - --v=2
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
         - name: node
           image: docker.io/patrostkowski/local-block-storage-csi:latest
           imagePullPolicy: IfNotPresent
@@ -178,7 +118,7 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           args:
-            - node
+            - plugin
             - --node-id=$(NODE_ID)
             - --endpoint=unix:///csi/csi.sock
             - --data-root=/var/lib/local-block-storage-csi
