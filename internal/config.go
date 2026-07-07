@@ -27,7 +27,8 @@ type Config struct {
 	NodeID             string
 	DataRoot           string
 	StateRoot          string
-	Mode               string
+	ControllerEnabled  bool
+	NodeEnabled        bool
 	CleanupLoopDevices bool
 	DeviceSymlinkRoot  string
 }

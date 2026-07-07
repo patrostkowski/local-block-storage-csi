@@ -1,4 +1,4 @@
-package node
+package plugin
 
 import (
 	"github.com/patrostkowski/local-block-storage-csi/internal"
@@ -10,17 +10,18 @@ func NewCommand(baseCfg func() internal.Config) *cobra.Command {
 	var nodeID string
 
 	cmd := &cobra.Command{
-		Use:   "node",
-		Short: "Run node service",
+		Use:   "plugin",
+		Short: "Run the CSI controller and node services for this node",
 		Run: func(cmd *cobra.Command, args []string) {
 			if nodeID == "" {
 				klog.Fatalf("--node-id is required")
 			}
 			cfg := baseCfg()
-			cfg.Mode = "node"
+			cfg.ControllerEnabled = true
+			cfg.NodeEnabled = true
 			cfg.NodeID = nodeID
 			if err := internal.Run(cfg); err != nil {
-				klog.Fatalf("node failed: %v", err)
+				klog.Fatalf("plugin failed: %v", err)
 			}
 		},
 	}

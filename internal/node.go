@@ -16,7 +16,7 @@ import (
 )
 
 func (d *Driver) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
-	if d.cfg.Mode != "node" {
+	if !d.cfg.NodeEnabled {
 		return nil, status.Error(codes.Unimplemented, "node service not enabled")
 	}
 
@@ -29,7 +29,7 @@ func (d *Driver) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.Nod
 }
 
 func (d *Driver) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {
-	if d.cfg.Mode != "node" {
+	if !d.cfg.NodeEnabled {
 		return nil, status.Error(codes.Unimplemented, "node service not enabled")
 	}
 
@@ -62,7 +62,7 @@ func (d *Driver) loadAndValidateVolume(volumeID string) (*Volume, error) {
 }
 
 func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error) {
-	if d.cfg.Mode != "node" {
+	if !d.cfg.NodeEnabled {
 		return nil, status.Error(codes.Unimplemented, "node service not enabled")
 	}
 	if req.GetVolumeId() == "" {
@@ -93,7 +93,7 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 }
 
 func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {
-	if d.cfg.Mode != "node" {
+	if !d.cfg.NodeEnabled {
 		return nil, status.Error(codes.Unimplemented, "node service not enabled")
 	}
 	if req.GetVolumeId() == "" {
@@ -139,7 +139,7 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 }
 
 func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest) (*csi.NodePublishVolumeResponse, error) {
-	if d.cfg.Mode != "node" {
+	if !d.cfg.NodeEnabled {
 		return nil, status.Error(codes.Unimplemented, "node service not enabled")
 	}
 	if req.GetVolumeId() == "" {
@@ -175,7 +175,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 }
 
 func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
-	if d.cfg.Mode != "node" {
+	if !d.cfg.NodeEnabled {
 		return nil, status.Error(codes.Unimplemented, "node service not enabled")
 	}
 	if req.GetVolumeId() == "" {
