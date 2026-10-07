@@ -27,7 +27,7 @@ func (d *Driver) EnsureDeviceSymlink(volumeID, loopDevice string) (string, error
 	if loopDevice == "" {
 		return "", fmt.Errorf("missing loop device")
 	}
-	if !strings.HasPrefix(loopDevice, "/dev/loop") {
+	if !strings.HasPrefix(loopDevice, loopDevicePrefix) {
 		return "", fmt.Errorf("invalid loop device path %q", loopDevice)
 	}
 	if _, err := os.Stat(loopDevice); err != nil {
@@ -151,15 +151,15 @@ func (d *Driver) reconcileVolumeSymlinks() {
 			continue
 		}
 
-		loopDevice := state.LoopDevice
-		if loopDevice == "" {
-			loopDevice, err = d.findLoopDeviceByBackingFile(state.BackingFile)
-			if err != nil {
-				klog.Warningf("lookup loop device during symlink reconciliation volumeID=%s backingFile=%s: %v", state.VolumeID, state.BackingFile.Path(), err)
-				continue
-			}
+		loopDevice, findErr := d.findLoopDeviceByBackingFile(state.BackingFile)
+		if findErr != nil {
+			klog.Warningf("lookup loop device during symlink reconciliation volumeID=%s backingFile=%s: %v", state.VolumeID, state.BackingFile.Path(), findErr)
+			continue
 		}
 		if loopDevice == "" {
+			if removeErr := d.RemoveDeviceSymlink(state.VolumeID); removeErr != nil {
+				klog.Warningf("remove symlink for detached volume volumeID=%s: %v", state.VolumeID, removeErr)
+			}
 			continue
 		}
 

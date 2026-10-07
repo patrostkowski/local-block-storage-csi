@@ -67,16 +67,19 @@ func (d LoopDevice) Detach() error {
 
 func (d *Driver) findLoopDeviceByBackingFile(backingFile BackingFile) (LoopDevice, error) {
 	dev, ino, err := backingFile.DevInode()
-	if err != nil {
+	if errors.Is(err, unix.ENOENT) {
 		return "", nil
 	}
+	if err != nil {
+		return "", Addf(err, "stat backing file %s", backingFile.Path())
+	}
 
-	paths, err := filepath.Glob("/dev/loop*")
+	paths, err := filepath.Glob(loopDeviceGlob)
 	if err != nil {
 		return "", err
 	}
 	for _, path := range paths {
-		if path == "/dev/loop-control" {
+		if path == loopControlPath {
 			continue
 		}
 		ld := LoopDevice(path)
@@ -115,12 +118,12 @@ func (d *Driver) cleanupStaleLoopDevicesLocked() error {
 		return err
 	}
 
-	paths, err := filepath.Glob("/dev/loop*")
+	paths, err := filepath.Glob(loopDeviceGlob)
 	if err != nil {
 		return err
 	}
 	for _, path := range paths {
-		if path == "/dev/loop-control" {
+		if path == loopControlPath {
 			continue
 		}
 		loopDevice := LoopDevice(path)
@@ -158,7 +161,7 @@ func (d *Driver) cleanupStaleLoopDevicesLocked() error {
 }
 
 func (d *Driver) countLoopDevices() (int, error) {
-	paths, err := filepath.Glob("/dev/loop[0-9]*")
+	paths, err := filepath.Glob(loopDeviceNumberedGlob)
 	if err != nil {
 		return 0, err
 	}
@@ -166,10 +169,10 @@ func (d *Driver) countLoopDevices() (int, error) {
 }
 
 func (d *Driver) ensureNextLoopDeviceNode() error {
-	if _, err := os.Stat("/dev/loop-control"); err != nil {
-		return fmt.Errorf("missing /dev/loop-control")
+	if _, err := os.Stat(loopControlPath); err != nil {
+		return fmt.Errorf("missing %s", loopControlPath)
 	}
-	paths, err := filepath.Glob("/dev/loop[0-9]*")
+	paths, err := filepath.Glob(loopDeviceNumberedGlob)
 	if err != nil {
 		return err
 	}
@@ -193,7 +196,7 @@ func (d *Driver) ensureNextLoopDeviceNode() error {
 		}
 		next = max + 1
 	}
-	path := fmt.Sprintf("/dev/loop%d", next)
+	path := fmt.Sprintf("%s%d", loopDevicePrefix, next)
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}

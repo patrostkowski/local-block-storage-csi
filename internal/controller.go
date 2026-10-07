@@ -102,7 +102,6 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		BackingFile:   BackingFile(backingFile),
 		CapacityBytes: capBytes,
 		NodeID:        nodeID,
-		PublishedTo:   map[string]LoopDevice{},
 	}
 	if err := vol.Save(); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist volume state: %v", err)

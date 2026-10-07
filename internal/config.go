@@ -16,6 +16,13 @@ const (
 	DefaultDeviceSymlinkRoot = "/dev/local-block-storage-csi"
 )
 
+const (
+	loopDevicePrefix       = "/dev/loop"
+	loopDeviceGlob         = "/dev/loop*"
+	loopDeviceNumberedGlob = "/dev/loop[0-9]*"
+	loopControlPath        = "/dev/loop-control"
+)
+
 var (
 	GitCommit = "unknown"
 	BuildTime = "unknown"
@@ -39,12 +46,10 @@ type BackingFile string
 type Volume struct {
 	d *Driver
 
-	VolumeID      string                `json:"volumeID"`
-	BackingFile   BackingFile           `json:"backingFile"`
-	CapacityBytes int64                 `json:"capacityBytes"`
-	NodeID        string                `json:"nodeID"`
-	LoopDevice    LoopDevice            `json:"loopDevice,omitempty"`
-	PublishedTo   map[string]LoopDevice `json:"publishedTo,omitempty"`
+	VolumeID      string      `json:"volumeID"`
+	BackingFile   BackingFile `json:"backingFile"`
+	CapacityBytes int64       `json:"capacityBytes"`
+	NodeID        string      `json:"nodeID"`
 }
 
 type Driver struct {

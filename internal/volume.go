@@ -39,24 +39,23 @@ func (v *Volume) Save() error {
 	return os.Rename(temporaryPath, v.d.volumeStatePath(v.VolumeID))
 }
 
-func (v *Volume) EnsureLoopDevice() error {
-	if v.LoopDevice != "" {
-		return nil
-	}
+// EnsureLoopDevice returns the loop device backed by the volume's file, attaching one if none exists.
+func (v *Volume) EnsureLoopDevice() (LoopDevice, error) {
+	v.d.mu.Lock()
+	defer v.d.mu.Unlock()
 
 	devicePath, err := v.d.findLoopDeviceByBackingFile(v.BackingFile)
 	if err != nil {
-		return fmt.Errorf("scan loop devices: %w", err)
+		return "", fmt.Errorf("scan loop devices: %w", err)
 	}
 	if devicePath != "" {
-		klog.Infof("reuse loop device backingFile=%s loopDevice=%s", v.BackingFile.Path(), devicePath.Path())
-		v.LoopDevice = devicePath
-		return nil
+		klog.V(2).Infof("reuse loop device backingFile=%s loopDevice=%s", v.BackingFile.Path(), devicePath.Path())
+		return devicePath, nil
 	}
 
 	if count, err := v.d.countLoopDevices(); err == nil && count == 0 {
 		if err := v.d.ensureNextLoopDeviceNode(); err != nil {
-			return fmt.Errorf("ensure loop device node: %w", err)
+			return "", fmt.Errorf("ensure loop device node: %w", err)
 		}
 	}
 
@@ -66,9 +65,8 @@ func (v *Volume) EnsureLoopDevice() error {
 		loopDevice, err2 := losetup.Attach(v.BackingFile.Path(), 0, false)
 		if err2 == nil {
 			klog.Infof("attached loop device backingFile=%s loopDevice=%s", v.BackingFile.Path(), loopDevice.Path())
-			v.LoopDevice = LoopDevice(loopDevice.Path())
 			_ = v.d.ensureNextLoopDeviceNode()
-			return nil
+			return LoopDevice(loopDevice.Path()), nil
 		}
 		lastErr = err2
 		if ensureErr := v.d.ensureNextLoopDeviceNode(); ensureErr != nil {
@@ -76,30 +74,30 @@ func (v *Volume) EnsureLoopDevice() error {
 		}
 	}
 	if count, countErr := v.d.countLoopDevices(); countErr == nil && count == 0 {
-		return fmt.Errorf("attach loop device: %w (no /dev/loopN devices found; ensure loop module is loaded and device nodes exist)", lastErr)
+		return "", fmt.Errorf("attach loop device: %w (no /dev/loopN devices found; ensure loop module is loaded and device nodes exist)", lastErr)
 	}
-	return fmt.Errorf("attach loop device: %w", lastErr)
+	return "", fmt.Errorf("attach loop device: %w", lastErr)
 }
 
 func (v *Volume) DetachLoopDevice() error {
-	if v.LoopDevice == "" {
+	v.d.mu.Lock()
+	defer v.d.mu.Unlock()
+
+	loopDevice, err := v.d.findLoopDeviceByBackingFile(v.BackingFile)
+	if err != nil {
+		return fmt.Errorf("scan loop devices: %w", err)
+	}
+	if loopDevice == "" {
 		return nil
 	}
-	if err := v.LoopDevice.Detach(); err != nil {
-		if errors.Is(err, ErrBusy) {
-			return nil
-		}
+	if err := loopDevice.Detach(); err != nil && !errors.Is(err, ErrBusy) {
 		return err
 	}
-	v.LoopDevice = ""
 	return nil
 }
 
-func (v *Volume) Symlink() error {
-	if v.LoopDevice == "" {
-		return fmt.Errorf("no loop device set for volume %s", v.VolumeID)
-	}
-	_, err := v.d.EnsureDeviceSymlink(v.VolumeID, v.LoopDevice.Path())
+func (v *Volume) Symlink(loopDevice LoopDevice) error {
+	_, err := v.d.EnsureDeviceSymlink(v.VolumeID, loopDevice.Path())
 	return err
 }
 
@@ -107,21 +105,17 @@ func (v *Volume) RemoveSymlink() error {
 	return v.d.RemoveDeviceSymlink(v.VolumeID)
 }
 
-func (v *Volume) Publish(targetPath string) error {
-	if v.LoopDevice == "" {
-		return fmt.Errorf("no loop device set for volume %s", v.VolumeID)
-	}
-
-	srcInfo, err := os.Stat(v.LoopDevice.Path())
+func (v *Volume) Publish(loopDevice LoopDevice, targetPath string) error {
+	srcInfo, err := os.Stat(loopDevice.Path())
 	if err != nil {
-		return fmt.Errorf("stat source device %s: %w", v.LoopDevice.Path(), err)
+		return fmt.Errorf("stat source device %s: %w", loopDevice.Path(), err)
 	}
 	srcStat, ok := srcInfo.Sys().(*syscall.Stat_t)
 	if !ok {
-		return fmt.Errorf("unexpected stat type for %s", v.LoopDevice.Path())
+		return fmt.Errorf("unexpected stat type for %s", loopDevice.Path())
 	}
 	if (srcInfo.Mode() & os.ModeDevice) == 0 {
-		return fmt.Errorf("source is not a device: %s", v.LoopDevice.Path())
+		return fmt.Errorf("source is not a device: %s", loopDevice.Path())
 	}
 
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
@@ -158,34 +152,21 @@ func (v *Volume) Publish(targetPath string) error {
 		return nil
 	}
 
-	if mountErr := unix.Mount(v.LoopDevice.Path(), targetPath, "", unix.MS_BIND, ""); mountErr != nil {
-		return fmt.Errorf("bind mount %s -> %s: %w", v.LoopDevice.Path(), targetPath, mountErr)
+	if mountErr := unix.Mount(loopDevice.Path(), targetPath, "", unix.MS_BIND, ""); mountErr != nil {
+		return fmt.Errorf("bind mount %s -> %s: %w", loopDevice.Path(), targetPath, mountErr)
 	}
-
-	if v.PublishedTo == nil {
-		v.PublishedTo = map[string]LoopDevice{}
-	}
-	v.PublishedTo[targetPath] = v.LoopDevice
 
 	return nil
 }
 
-func (v *Volume) Unpublish(targetPath string) error {
-	if v.d.isMounted(targetPath) {
+func (d *Driver) unpublishTarget(targetPath string) error {
+	if d.isMounted(targetPath) {
 		if unmountErr := unix.Unmount(targetPath, 0); unmountErr != nil {
 			return fmt.Errorf("unmount target %s: %w", targetPath, unmountErr)
 		}
 	}
 	if err := removeIfExists(targetPath); err != nil {
 		return fmt.Errorf("remove target %s: %w", targetPath, err)
-	}
-	if v.PublishedTo != nil {
-		delete(v.PublishedTo, targetPath)
-		for tp := range v.PublishedTo {
-			if _, statErr := os.Stat(tp); statErr != nil && os.IsNotExist(statErr) {
-				delete(v.PublishedTo, tp)
-			}
-		}
 	}
 	return nil
 }

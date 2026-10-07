@@ -80,13 +80,12 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, err
 	}
 
-	if err := vol.EnsureLoopDevice(); err != nil {
+	loopDevice, err := vol.EnsureLoopDevice()
+	if err != nil {
 		return nil, status.Error(StatusCode(err), err.Error())
 	}
-	vol.Symlink()
-
-	if err := vol.Save(); err != nil {
-		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
+	if err := vol.Symlink(loopDevice); err != nil {
+		klog.Warningf("NodeStageVolume failed creating device symlink volumeID=%s: %v", vol.VolumeID, err)
 	}
 
 	return &csi.NodeStageVolumeResponse{}, nil
@@ -108,14 +107,6 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 		return nil, status.Errorf(codes.Internal, "load volume state: %v", err)
 	}
 
-	if vol.PublishedTo != nil {
-		for targetPath := range vol.PublishedTo {
-			if _, statErr := os.Stat(targetPath); statErr != nil && os.IsNotExist(statErr) {
-				delete(vol.PublishedTo, targetPath)
-			}
-		}
-	}
-
 	if detachErr := vol.DetachLoopDevice(); detachErr != nil {
 		klog.Warningf("NodeUnstageVolume failed to detach loop device volumeID=%s: %v", vol.VolumeID, detachErr)
 	}
@@ -129,10 +120,6 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 			klog.Infof("NodeUnstageVolume cleaned up state for deleted volume volumeID=%s", vol.VolumeID)
 			return &csi.NodeUnstageVolumeResponse{}, nil
 		}
-	}
-
-	if err := vol.Save(); err != nil {
-		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
 	}
 
 	return &csi.NodeUnstageVolumeResponse{}, nil
@@ -157,18 +144,17 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, err
 	}
 
-	if err := vol.EnsureLoopDevice(); err != nil {
+	loopDevice, err := vol.EnsureLoopDevice()
+	if err != nil {
 		return nil, status.Error(StatusCode(err), err.Error())
 	}
 
-	if err := vol.Publish(req.GetTargetPath()); err != nil {
+	if err := vol.Publish(loopDevice, req.GetTargetPath()); err != nil {
 		return nil, status.Error(StatusCode(err), err.Error())
 	}
 
-	vol.Symlink()
-
-	if err := vol.Save(); err != nil {
-		return nil, status.Errorf(codes.Internal, "save volume state: %v", err)
+	if err := vol.Symlink(loopDevice); err != nil {
+		klog.Warningf("NodePublishVolume failed creating device symlink volumeID=%s: %v", vol.VolumeID, err)
 	}
 
 	return &csi.NodePublishVolumeResponse{}, nil
@@ -185,17 +171,8 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 		return nil, status.Error(codes.InvalidArgument, "missing target_path")
 	}
 
-	vol, err := d.loadVolumeStateByID(req.GetVolumeId())
-	if err != nil || vol.PublishedTo == nil {
-		return &csi.NodeUnpublishVolumeResponse{}, nil
-	}
-
-	if unpublishErr := vol.Unpublish(req.GetTargetPath()); unpublishErr != nil {
-		return nil, status.Error(StatusCode(unpublishErr), unpublishErr.Error())
-	}
-
-	if saveErr := vol.Save(); saveErr != nil {
-		return nil, status.Errorf(codes.Internal, "save volume state: %v", saveErr)
+	if err := d.unpublishTarget(req.GetTargetPath()); err != nil {
+		return nil, status.Error(StatusCode(err), err.Error())
 	}
 
 	return &csi.NodeUnpublishVolumeResponse{}, nil
