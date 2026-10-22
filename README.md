@@ -8,6 +8,12 @@ Small CSI driver that provisions local loop-backed raw block volumes for Kuberne
 kubectl apply -f https://raw.githubusercontent.com/patrostkowski/local-block-storage-csi/main/deploy/manifest.yaml
 ```
 
+Or with kustomize:
+
+```bash
+kubectl apply -k "github.com/patrostkowski/local-block-storage-csi/deploy?ref=main"
+```
+
 This creates a `StorageClass` named `local-block-storage-csi`.
 
 ## Disclaimer
